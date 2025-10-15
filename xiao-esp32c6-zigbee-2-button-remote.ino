@@ -1,107 +1,92 @@
-/*
- * ESP32-C6 Zigbee 2-Button Remote Control
- *
- * Battery-powered Zigbee remote with 2 buttons controlling up to 3 devices/groups.
- *
- * Button Gestures:
- *   BTN1 / BTN2 (single button):
- *     - Single click:      Toggle light on/off
- *     - Long hold:         Adjust brightness (direction alternates)
- *     - Click + hold:      Adjust color temperature (direction alternates)
- *     - Double click:      Toggle light on/off
- *
- *   BTN1 + BTN2 (both pressed):
- *     - Click:             Toggle Lamp 3 on/off
- *     - Long hold:         Adjust Lamp 3 brightness
- *
- *   Pairing mode:
- *     - 6 quick clicks on BTN1 within 5s → Factory reset + network steering
- *
- * Power Management:
- *   - Deep sleep between button presses
- *   - Wakes on button press or every 6 hours for battery report
- *   - Automatic sleep timeout: 30s max button hold
- *
- * Hardware: XIAO ESP32-C6
- *   - BTN1: GPIO2 (D1)
- *   - BTN2: GPIO3 (D2)
- *   - VBAT: A0 (battery monitoring)
- */
-
-#ifndef ZIGBEE_MODE_ED
-#error "Zigbee end device mode is not selected in Tools->Zigbee mode"
-#endif
+// #ifndef ZIGBEE_MODE_ED
+// #error "Zigbee end device mode is not selected in Tools->Zigbee mode"
+// #endif
 
 #include "constants.h"
 
-void setup() {
-  // Initialize NVS preferences (stores brightness/color temp direction flag)
-  prefs.begin("zb-remote", false);
-  dir_up = prefs.getBool("dir_up", true);
+void setup()
+{
+  // #if DEBUG_MODE
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== DEBUG MODE: Gestures test (no Zigbee) ===\n");
+  // #endif
 
-  // Configure buttons as inputs with internal pullups (LOW = pressed)
-  pinMode(BTN1_PIN, INPUT_PULLUP);
-  pinMode(BTN2_PIN, INPUT_PULLUP);
+  // NVS preferences (stores direction flag)
+  // prefs.begin("zb-remote", false);
+  // dir_up = prefs.getBool("dir_up", true);
 
-  // Determine wake source heuristic:
-  // If both buttons are idle (HIGH) at wake → timer wake (battery report)
-  // If any button is LOW → button wake (user interaction)
-  woke_by_timer = (digitalRead(BTN1_PIN) == HIGH && digitalRead(BTN2_PIN) == HIGH);
+  // Heuristic wake source
+  // woke_by_timer = (digitalRead(BTN1_PIN) == HIGH && digitalRead(BTN2_PIN) == HIGH);
 
-  // Initialize Zigbee stack as End Device and register 3 switch endpoints
-  zigbeeInit();
+  // #if !DEBUG_MODE
+  // Start Zigbee stack and register endpoints
+  // zigbeeInit();
 
-  // Wait for network connection (up to 8s for initial pairing)
-  uint32_t t0 = millis();
-  while (!Zigbee.connected() && millis() - t0 < 8000) {
-    Zigbee.run();
-    delay(50);
-  }
+  // Give stack time to connect (first join may take longer)
+  // uint32_t t0 = millis();
+  // while (!Zigbee.connected() && millis() - t0 < 8000) {
+  // Zigbee.run();
+  // delay(50);
+  // }
+  // #endif
 
-  // Initialize button state machines
   initButtons();
 
-  // Timer wake path: report battery and return to sleep immediately
-  if (woke_by_timer) {
-    uint16_t mv = read_battery_mv();
-    report_battery(mv);
-    goto_sleep();  // Does not return
-  }
-  // If button wake: continue to loop() for user interaction handling
+  // #if !DEBUG_MODE
+  // Timer wake → report battery and sleep
+  // if (woke_by_timer) {
+  // uint16_t mv = read_battery_mv();
+  // report_battery(mv);
+  // goto_sleep(); // no return
+  // }
+  // #endif
 }
 
-void loop() {
-  // Service Zigbee stack (handle incoming messages, maintain connection)
-  Zigbee.run();
+void loop()
+{
+  // #if !DEBUG_MODE
+  // Zigbee.run();
+  // #endif
 
-  // PAIRING MODE: Keep radio active during network steering window
-  if (pairing_mode) {
-    if (millis() < pairing_deadline_ms) {
-      delay(50);
-      return;  // Stay awake until pairing window expires
-    } else {
-      pairing_mode = false;
-      goto_sleep();  // Pairing window expired, return to sleep
-    }
-  }
+  // Keep awake during pairing window
+  //   if (pairing_mode) {
+  //     if (millis() < pairing_deadline_ms) {
+  //       delay(50);
+  //       return;
+  //     } else {
+  //       pairing_mode = false;
+  // #if !DEBUG_MODE
+  //       goto_sleep();
+  // #endif
+  //     }
+  //   }
 
-  // STEP 1: Check for pairing sequence (6 quick clicks on BTN1)
-  if (detect_pairing_sequence()) {
-    enter_pairing_mode();  // Factory reset + network steering for STEER_SECONDS
-    return;                // Stay awake during steering window
-  }
+  // STEP 1: Optional pairing sequence (6 clicks on BTN1)
+  // if (detect_pairing_sequence()) {
+  //   enter_pairing_mode();
+  //   return;
+  // }
 
-  // STEP 2: Handle normal button interactions
-  if (bothPressedEarly()) {
-    // Both buttons pressed → control Lamp 3 (endpoint 3)
-    handleTarget(EP_L3);
-  } else {
-    // Single button pressed → control respective lamp
-    if (digitalRead(BTN1_PIN) == LOW) handleTarget(EP_L1);  // Button 1 → Lamp 1
-    if (digitalRead(BTN2_PIN) == LOW) handleTarget(EP_L2);  // Button 2 → Lamp 2
-  }
+  // STEP 2: Normal interactions
+  // If you want “both buttons = Lamp 3”, uncomment this block:
+  // if (bothPressedEarly()) {
+  //   handleBothButtons(EP_L3);
+  // } else {
+  //   if (digitalRead(BTN1_PIN) == LOW) handleButton(EP_L1);
+  //   if (digitalRead(BTN2_PIN) == LOW) handleButton(EP_L2);
+  // }
 
-  // STEP 3: Return to deep sleep to conserve battery
-  delay(20);
-  goto_sleep();  // Does not return (wakes on button or timer)
+  // Current: single buttons only (as in your code)
+  ButtonEvent ev1 = handleButton(b1);
+  ButtonEvent ev2 = handleButton(b2);
+  routeEvents(ev1, ev2);
+
+  // STEP 3: Sleep (or delay in DEBUG)
+  // delay(20);
+  // #if !DEBUG_MODE
+  // goto_sleep(); // no return
+  // #else
+  delay(10);
+  // #endif
 }
