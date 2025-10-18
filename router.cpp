@@ -14,54 +14,51 @@ static ButtonEvent matchingEnd(ButtonEvent startEv)
                                               : ButtonEvent::CLICK_HOLD_END;
 }
 
-static void debugPrint(LampId lamp, ButtonEvent ev)
+static void sendAction(void (*callback)(LampId), LampId lampId, const char *msg)
+{
+#if DEBUG_MODE
+  Serial.print("[SEND]");
+  Serial.print(msg);
+  Serial.print(static_cast<uint8_t>(lampId));
+#else
+  callback(lampId);
+#endif
+}
+
+void dispatch(LampId lampId, ButtonEvent ev)
 {
   if (ev == ButtonEvent::NONE)
     return;
 
-  Serial.print("[SEND] Lamp ");
-  Serial.print(static_cast<uint8_t>(lamp));
-  Serial.print(" → ");
-
   switch (ev)
   {
   case ButtonEvent::CLICK:
-    Serial.println("CLICK");
+    sendAction(cmd_toggle, lampId, "CLICK");
     break;
   case ButtonEvent::HOLD_START:
-    Serial.println("HOLD_START");
+    sendAction(cmd_level_start, lampId, "HOLD_START");
     break;
   case ButtonEvent::HOLD_END:
-    Serial.println("HOLD_END");
+    sendAction(cmd_level_stop, lampId, "HOLD_END");
     break;
   case ButtonEvent::CLICK_HOLD_START:
-    Serial.println("CLICK_HOLD_START");
+    sendAction(cmd_ct_start, lampId, "CLICK_HOLD_START");
     break;
   case ButtonEvent::CLICK_HOLD_END:
-    Serial.println("CLICK_HOLD_END");
+    sendAction(cmd_ct_stop, lampId, "CLICK_HOLD_END");
     break;
   case ButtonEvent::DOUBLE_CLICK:
-    Serial.println("DOUBLE_CLICK");
+    sendAction(cmd_empty_action, lampId, "DOUBLE_CLICK");
     break;
   case ButtonEvent::TRIPLE_CLICK:
-    Serial.println("TRIPLE_CLICK");
+    sendAction(cmd_empty_action, lampId, "TRIPLE_CLICK");
     break;
   case ButtonEvent::PAIRING_SEQUENCE:
-    Serial.println("PAIRING_SEQUENCE");
+    sendAction(enter_pairing_mode, lampId, "PAIRING_SEQUENCE");
     break;
   default:
     break;
   }
-}
-
-void sendAction(LampId lamp, ButtonEvent ev)
-{
-#if DEBUG_MODE
-  debugPrint(lamp, ev);
-#else
-  // ZigbeeSwitch* lamp = getLamp(ep);
-  // if (lamp) lamp->lightToggle();
-#endif
 }
 
 EventRouter router = {};
@@ -87,7 +84,7 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
 
     if (router.ev1_pending == ButtonEvent::NONE && router.ev2_pending == ButtonEvent::NONE)
     {
-      sendAction(LampId::L3, ev_final);
+      dispatch(LampId::L3, ev_final);
       router = {};
     }
 
@@ -103,7 +100,7 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
     // avoid losing a previous pending from BTN1
     if (router.ev1_pending != ButtonEvent::NONE)
     {
-      sendAction(LampId::L1, router.ev1_pending);
+      dispatch(LampId::L1, router.ev1_pending);
     }
     router.ev1_pending = ev1;
   }
@@ -114,7 +111,7 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
     // avoid losing a previous pending from BTN2
     if (router.ev2_pending != ButtonEvent::NONE)
     {
-      sendAction(LampId::L2, router.ev2_pending);
+      dispatch(LampId::L2, router.ev2_pending);
     }
     router.ev2_pending = ev2;
   }
@@ -128,11 +125,11 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
   {
     if (router.ev1_pending != ButtonEvent::NONE)
     {
-      sendAction(LampId::L1, router.ev1_pending);
+      dispatch(LampId::L1, router.ev1_pending);
     }
     if (router.ev2_pending != ButtonEvent::NONE)
     {
-      sendAction(LampId::L2, router.ev2_pending);
+      dispatch(LampId::L2, router.ev2_pending);
     }
     router = {};
     return;
@@ -143,7 +140,7 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
       router.ev1_pending == router.ev2_pending)
   {
     ButtonEvent ev = router.ev1_pending;
-    sendAction(LampId::L3, ev);
+    dispatch(LampId::L3, ev);
     router = {};
 
     if (isHoldStart(ev))

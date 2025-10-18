@@ -1,11 +1,10 @@
 #pragma once
 #include <Arduino.h>
-// #include <Preferences.h>
+#include <Preferences.h>
 #include <Zigbee.h>
 
 /* ===================== Debug Mode ===================== */
-// Set to true to test gestures without Zigbee (prints to Serial)
-// constexpr bool DEBUG_MODE = true;
+constexpr bool DEBUG_MODE = true; // Set to true to test gestures without Zigbee (prints to Serial)
 
 /* ===================== Pins ===================== */
 constexpr int BTN1_PIN = 1;          // XIAO ESP32-C6: D1 = GPIO1
@@ -27,32 +26,29 @@ constexpr int EP_L3 = 3; // Endpoint 3: controlled by both buttons simultaneousl
 
 /* ===================== Battery ===================== */
 // Battery voltage calculation: Vbat = Vadc * VBAT_DIVIDER * ADC_CAL_K
-// constexpr float VBAT_DIVIDER  = 2.00f; // Hardware voltage divider ratio (adjust per schematic)
-// constexpr float ADC_CAL_K = 1.00f; // Fine calibration factor (measure & tune)
-// constexpr int PING_INTERVAL_HOURS = 6 // Wake interval for battery report (maintains network presence)
+constexpr float VBAT_DIVIDER = 2.00f;      // Hardware voltage divider ratio (adjust per schematic)
+constexpr float ADC_CAL_K = 1.00f;         // Fine calibration factor (measure & tune)
+constexpr uint8_t PING_INTERVAL_HOURS = 6; // Wake interval for battery report (maintains network presence)
 
 /* ===================== Pairing ===================== */
-// "Secret knock" pattern to enter pairing mode
-constexpr uint16_t PAIRING_WINDOW_MS = 5000; // Time window to complete the click sequence (ms)
-constexpr uint8_t STEER_SECONDS = 180;       // Network steering duration (device discovery window)
+constexpr uint8_t STEER_SECONDS = 180; // Network steering duration (device discovery window)
 
 /* ===================== Global state ===================== */
-// extern Preferences prefs;
-
+extern Preferences prefs;
 extern bool dir_up;        // true=up, false=down (toggles after each hold_stop)
 extern bool woke_by_timer; // heuristic: timer wake vs button wake
 extern bool pairing_mode;  // active pairing window
 extern uint32_t pairing_deadline_ms;
 
 /* ===================== Zigbee endpoints (clients) ===================== */
-// extern ZigbeeSwitch lamp1;  // EP_L1
-// extern ZigbeeSwitch lamp2;  // EP_L2
-// extern ZigbeeSwitch lamp3;  // EP_L3
+extern ZigbeeSwitch lamp1; // EP_L1
+extern ZigbeeSwitch lamp2; // EP_L2
+extern ZigbeeSwitch lamp3; // EP_L3
 enum class LampId : uint8_t
 {
-  L1 = 1,
-  L2 = 2,
-  L3 = 3
+  L1 = EP_L1,
+  L2 = EP_L2,
+  L3 = EP_L3
 };
 
 /* ===================== Buttons API ===================== */
@@ -109,66 +105,23 @@ extern EventRouter router;
 void routeEvents(ButtonEvent ev1, ButtonEvent ev2);
 
 void sendAction(LampId lamp, ButtonEvent ev);
-// bool bothPressedEarly();
-// bool detect_pairing_sequence();
 
 /* ===================== Zigbee / control API ===================== */
-// void zigbeeInit();
+void zigbeeInit();
 
 // On/Off, Level, Color Temperature commands
-void cmd_toggle(uint8_t ep);
-void cmd_level_start(uint8_t ep, bool up);
-void cmd_level_stop(uint8_t ep);
-void cmd_ct_start(uint8_t ep, bool up);
-void cmd_ct_stop(uint8_t ep);
+void cmd_toggle(LampId lampId);
+void cmd_level_start(LampId lampId);
+void cmd_level_stop(LampId lampId);
+void cmd_ct_start(LampId lampId);
+void cmd_ct_stop(LampId lampId);
+void cmd_empty_action(LampId lampId);
 
 // Battery helpers
-// uint16_t read_battery_mv();
-// uint8_t  vbat_percent(uint16_t mv);
+uint16_t read_battery_mv();
+uint8_t vbat_percent(uint16_t mv);
 void report_battery(uint16_t mv);
 
 // Pairing and sleep
-// void enter_pairing_mode();
-// void goto_sleep();
-
-// Ми зчитуємо в loop() стан кнопки (HIGH/LOW) і передаємо його в функцію обробки.
-// Кнопка натиснута:
-// - press_timer запущений?
-//   - так:
-//     - press_timer < DEBOUNCE_MS → ігнор (дребезг)
-//     - DEBOUNCE_MS ≤ press_timer < HOLD_MS → чекаємо (нічого не шлемо).
-//     - HOLD_MS <= press_timer ≥ MAX_HOLD_MS - це довге натискання:
-//       - last_state == IDLE:
-//         - press_counter = 0 - відправляємо HOLD_START, last_state = HOLDING
-//         - press_counter > 0 - відправляємо CLICK_HOLD_START, last_state = CLICK_HOLDING
-//      - press_timer >= MAX_HOLD_MS
-//        - last_state == HOLDING - відправляємо HOLD_END, last_state = STUCK
-//        - last_state == CLICK_HOLDING - відправляємо CLICK_HOLD_END, last_state = STUCK
-//        - зупиняємо press_timer
-//   - ні:
-//     - last_state != STUCK - запускаємо press_timer
-// - release_timer запущений?
-//   - так:
-//     - зупиняємо release_timer
-
-// Кнопка відпущена:
-// - press_timer запущений?
-//   - так:
-//     - press_timer < DEBOUNCE_MS - ігноруємо (дрибезг)
-//     - press_timer >= DEBOUNCE_MS - зупиняємо press_timer
-// - last_state == HOLDING - відправляємо HOLD_END, last_state = IDLE
-// - last_state == CLICK_HOLDING - відправляємо CLICK_HOLD_END, last_state = IDLE
-// - last_state == IDLE:
-// - release_timer запущений?
-//   - так:
-//     - release_timer < DEBOUNCE_MS - ігноруємо (дрибезг)
-//     - release_timer >= DEBOUNCE_MS і < PRESS_MS - чекаємо
-//     - release_timer >= PRESS_MS - це кінець вікна між натисканнями:
-//       - press_counter == 1 - відправляємо CLICK
-//       - press_counter == 2 - відправляємо DOUBLE_CLICK
-//       - press_counter >= 3 i < PAIRING_CLICKS - відправляємо TRIPLE_CLICK
-//       - press_counter >= PAIRING_CLICKS - відправляємо PAIRING_SEQUENCE
-//       - скидаємо press_counter в 0
-//   - ні:
-//     - press_counter++
-//     - запускаємо release_timer
+void enter_pairing_mode();
+void goto_sleep();
