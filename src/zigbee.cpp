@@ -31,10 +31,17 @@ static inline bool pinRead(int pin) { return digitalRead(pin); }
 // Helper: validate and get lamp pointer
 static inline ZigbeeSwitch *getLamp(LampId id)
 {
-  if (id >= EP_L1 && id <= EP_L3)
+  uint8_t idx = static_cast<uint8_t>(id);
+
+  // Validate against LampId enum values
+  if (id == LampId::L1 || id == LampId::L2 || id == LampId::L3)
   {
-    return lamps[id - 1];
+    return lamps[idx - 1];
   }
+
+#if DEBUG_MODE
+  Serial.printf("[ERROR] Invalid LampId: %d\n", idx);
+#endif
   return nullptr;
 }
 
@@ -68,28 +75,39 @@ uint16_t read_battery_mv()
   // ADC → mV conversion
   // ESP32-C6 ADC: 12-bit (0-4095), with configurable attenuation
   // Default attenuation typically allows reading 0-3.3V or 0-2.5V range
-  int raw = analogRead(VBAT_ADC_PIN); // 0..4095
+  int raw = analogRead(VBAT_ADC_PIN);
 
   // ADC reference voltage (mV) - ESP32-C6 typically uses ~3300mV internal reference
   // May need calibration based on actual board configuration
-  float mv_adc = (raw / 4095.0f) * 3300.0f;
+  float mv_adc = (raw / static_cast<float>(ADC_MAX_VALUE)) * ADC_REF_MV;
 
   // Apply hardware divider and calibration factor
   float vbat_mv = mv_adc * VBAT_DIVIDER * ADC_CAL_K;
 
   // Clamp to reasonable range
-  if (vbat_mv < 0)
-    vbat_mv = 0;
-  if (vbat_mv > 5000)
-    vbat_mv = 5000;
+  if (vbat_mv < VBAT_MIN_MV)
+    vbat_mv = VBAT_MIN_MV;
+  if (vbat_mv > VBAT_MAX_MV)
+    vbat_mv = VBAT_MAX_MV;
 
   return (uint16_t)(vbat_mv + 0.5f);
 }
 
 uint8_t vbat_percent(uint16_t mv)
 {
+  constexpr size_t lut_size = sizeof(battery_lut) / sizeof(battery_lut[0]);
+
+  // Validate LUT size
+  if (lut_size < 2)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Battery LUT too small");
+#endif
+    return 0;
+  }
+
   // Clamp to valid range
-  if (mv <= battery_lut[sizeof(battery_lut) / sizeof(battery_lut[0]) - 1].mv)
+  if (mv <= battery_lut[lut_size - 1].mv)
   {
     return 0;
   }
@@ -99,12 +117,27 @@ uint8_t vbat_percent(uint16_t mv)
   }
 
   // Linear interpolation between lookup table entries
-  for (size_t i = 0; i < sizeof(battery_lut) / sizeof(battery_lut[0]) - 1; i++)
+  for (size_t i = 0; i < lut_size - 1; i++)
   {
+    // Bounds check before accessing array
+    if (i + 1 >= lut_size)
+    {
+#if DEBUG_MODE
+      Serial.println("[ERROR] Battery LUT bounds error");
+#endif
+      return 0;
+    }
+
     if (mv >= battery_lut[i + 1].mv && mv <= battery_lut[i].mv)
     {
       uint16_t mv_range = battery_lut[i].mv - battery_lut[i + 1].mv;
       uint8_t pct_range = battery_lut[i].pct - battery_lut[i + 1].pct;
+
+      // Avoid division by zero
+      if (mv_range == 0)
+      {
+        return battery_lut[i].pct;
+      }
 
       // Interpolate
       float ratio = (float)(mv - battery_lut[i + 1].mv) / mv_range;
@@ -127,11 +160,16 @@ void report_battery(uint16_t mv)
   // Power Configuration cluster (0x0001):
   //  - BatteryVoltage (0x0020): tenths of volts (e.g. 3.95V -> 39)
   //  - BatteryPercentageRemaining (0x0021): half-percent units (87% -> 174)
-  uint8_t zcl_voltage = (uint8_t)((mv + 50) / 100);
-  uint8_t zcl_pct = (uint8_t)(min<uint16_t>(pct * 2, 200));
+  uint8_t zcl_voltage = (uint8_t)((mv + ZCL_VOLTAGE_OFFSET) / ZCL_VOLTAGE_SCALE);
+  uint8_t zcl_pct = (uint8_t)(min<uint16_t>(pct * ZCL_PERCENTAGE_SCALE, ZCL_PERCENTAGE_MAX));
 
   // Report from EP1 to coordinator
-  Zigbee.reportPowerConfiguration(EP_L1, zcl_voltage, zcl_pct);
+  if (!Zigbee.reportPowerConfiguration(EP_L1, zcl_voltage, zcl_pct))
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Failed to report battery");
+#endif
+  }
 #endif
 }
 
@@ -148,8 +186,24 @@ void cmd_toggle(LampId lampId)
 {
   ZigbeeSwitch *lamp = getLamp(lampId);
 
-  if (lamp)
-    lamp->lightToggle();
+  if (!lamp)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Invalid lamp ID for toggle");
+#endif
+    return;
+  }
+
+#if !DEBUG_MODE
+  if (!lamp->lightToggle())
+  {
+#if DEBUG_MODE
+    Serial.printf("[ERROR] Failed to send toggle command to lamp %d\n", static_cast<uint8_t>(lampId));
+#endif
+  }
+#else
+  lamp->lightToggle();
+#endif
 }
 
 void cmd_level_start(LampId lampId)
@@ -158,20 +212,51 @@ void cmd_level_start(LampId lampId)
   ZigbeeSwitch *lamp = getLamp(lampId);
 
   if (!lamp)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Invalid lamp ID for level_start");
+#endif
     return;
+  }
 
+#if !DEBUG_MODE
+  bool success = up ? lamp->levelMoveUp() : lamp->levelMoveDown();
+  if (!success)
+  {
+#if DEBUG_MODE
+    Serial.printf("[ERROR] Failed to send level move command to lamp %d\n", static_cast<uint8_t>(lampId));
+#endif
+  }
+#else
   if (up)
     lamp->levelMoveUp();
   else
     lamp->levelMoveDown();
+#endif
 }
 
 void cmd_level_stop(LampId lampId)
 {
   ZigbeeSwitch *lamp = getLamp(lampId);
 
-  if (lamp)
-    lamp->levelStop();
+  if (!lamp)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Invalid lamp ID for level_stop");
+#endif
+    return;
+  }
+
+#if !DEBUG_MODE
+  if (!lamp->levelStop())
+  {
+#if DEBUG_MODE
+    Serial.printf("[ERROR] Failed to send level stop command to lamp %d\n", static_cast<uint8_t>(lampId));
+#endif
+  }
+#else
+  lamp->levelStop();
+#endif
 }
 
 void cmd_ct_start(LampId lampId)
@@ -180,20 +265,51 @@ void cmd_ct_start(LampId lampId)
   ZigbeeSwitch *lamp = getLamp(lampId);
 
   if (!lamp)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Invalid lamp ID for ct_start");
+#endif
     return;
+  }
 
+#if !DEBUG_MODE
+  bool success = up ? lamp->colorTempMoveUp() : lamp->colorTempMoveDown();
+  if (!success)
+  {
+#if DEBUG_MODE
+    Serial.printf("[ERROR] Failed to send color temp move command to lamp %d\n", static_cast<uint8_t>(lampId));
+#endif
+  }
+#else
   if (up)
     lamp->colorTempMoveUp();
   else
     lamp->colorTempMoveDown();
+#endif
 }
 
 void cmd_ct_stop(LampId lampId)
 {
   ZigbeeSwitch *lamp = getLamp(lampId);
 
-  if (lamp)
-    lamp->colorTempStop();
+  if (!lamp)
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Invalid lamp ID for ct_stop");
+#endif
+    return;
+  }
+
+#if !DEBUG_MODE
+  if (!lamp->colorTempStop())
+  {
+#if DEBUG_MODE
+    Serial.printf("[ERROR] Failed to send color temp stop command to lamp %d\n", static_cast<uint8_t>(lampId));
+#endif
+  }
+#else
+  lamp->colorTempStop();
+#endif
 }
 
 void cmd_empty_action(LampId lampId)
@@ -203,13 +319,27 @@ void cmd_empty_action(LampId lampId)
 /* ===================== Pairing ===================== */
 void enter_pairing_mode(LampId lampId)
 {
+  (void)lampId; // Unused parameter
+
   pairing_mode = true;
   pairing_deadline_ms = millis() + (STEER_SECONDS * 1000UL);
 
+#if DEBUG_MODE
+  Serial.println("[PAIRING] Entering pairing mode");
+#endif
+
   // Wipe network state and re-start as End Device
   Zigbee.factoryReset();
-  delay(200);
-  Zigbee.begin(ZIGBEE_END_DEVICE);
+  delay(ZIGBEE_REINIT_DELAY_MS);
+
+  if (!Zigbee.begin(ZIGBEE_END_DEVICE))
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Failed to restart Zigbee after factory reset");
+#endif
+    pairing_mode = false;
+    return;
+  }
 
   // Re-register endpoints
   Zigbee.addEndpoint(&lamp1);
@@ -217,7 +347,13 @@ void enter_pairing_mode(LampId lampId)
   Zigbee.addEndpoint(&lamp3);
 
   // Open network (steering window)
-  Zigbee.startSteering(STEER_SECONDS);
+  if (!Zigbee.startSteering(STEER_SECONDS))
+  {
+#if DEBUG_MODE
+    Serial.println("[ERROR] Failed to start steering");
+#endif
+    pairing_mode = false;
+  }
 }
 
 /* ===================== Sleep ===================== */
@@ -226,20 +362,21 @@ void goto_sleep()
 #if DEBUG_MODE
   delay(10); // Don't sleep in debug mode
 #else
-  const uint64_t us_6h = (uint64_t)PING_INTERVAL_HOURS * 3600ULL * 1000000ULL;
+  const uint64_t us_per_hour = 3600ULL * 1000000ULL;
+  const uint64_t sleep_duration_us = (uint64_t)PING_INTERVAL_HOURS * us_per_hour;
 
   // Wake sources: GPIO (buttons) + timer
   esp_deep_sleep_enable_gpio_wakeup(
       (1ULL << BTN1_PIN) | (1ULL << BTN2_PIN),
       ESP_GPIO_WAKEUP_GPIO_LOW);
-  esp_sleep_enable_timer_wakeup(us_6h);
+  esp_sleep_enable_timer_wakeup(sleep_duration_us);
 
   // Give stack time to flush TX
   uint32_t t0 = millis();
-  while (millis() - t0 < 50)
+  while (millis() - t0 < ZIGBEE_FLUSH_DELAY_MS)
   {
     Zigbee.run();
-    delay(5);
+    delay(ZIGBEE_FLUSH_INTERVAL_MS);
   }
 
   esp_deep_sleep_start();

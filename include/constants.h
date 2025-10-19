@@ -31,7 +31,26 @@ constexpr float ADC_CAL_K = 1.00f;         // Fine calibration factor (measure &
 constexpr uint8_t PING_INTERVAL_HOURS = 6; // Wake interval for battery report (maintains network presence)
 
 /* ===================== Pairing ===================== */
-constexpr uint8_t STEER_SECONDS = 180; // Network steering duration (device discovery window)
+constexpr uint8_t STEER_SECONDS = 180;    // Network steering duration (device discovery window)
+constexpr uint16_t PAIRING_LOOP_DELAY_MS = 50; // Non-blocking delay for pairing mode loop
+
+/* ===================== Zigbee Constants ===================== */
+constexpr uint16_t ZIGBEE_CONNECT_TIMEOUT_MS = 8000; // Max wait time for Zigbee connection
+constexpr uint16_t ZIGBEE_FLUSH_DELAY_MS = 50;       // Time to flush Zigbee TX before sleep
+constexpr uint16_t ZIGBEE_FLUSH_INTERVAL_MS = 5;     // Interval between Zigbee.run() calls during flush
+constexpr uint16_t ZIGBEE_REINIT_DELAY_MS = 200;     // Delay after factory reset before reinit
+
+/* ===================== Battery ZCL Constants ===================== */
+constexpr uint16_t ZCL_VOLTAGE_SCALE = 100;    // ZCL BatteryVoltage units (tenths of volts)
+constexpr uint8_t ZCL_VOLTAGE_OFFSET = 50;     // Rounding offset for voltage conversion
+constexpr uint8_t ZCL_PERCENTAGE_SCALE = 2;    // ZCL percentage scale (half-percent units)
+constexpr uint8_t ZCL_PERCENTAGE_MAX = 200;    // ZCL max percentage value (100% * 2)
+
+/* ===================== ADC Constants ===================== */
+constexpr uint16_t ADC_MAX_VALUE = 4095;       // 12-bit ADC maximum value
+constexpr uint16_t ADC_REF_MV = 3300;          // ADC reference voltage (mV)
+constexpr uint16_t VBAT_MIN_MV = 0;            // Minimum valid battery voltage (mV)
+constexpr uint16_t VBAT_MAX_MV = 5000;         // Maximum valid battery voltage (mV)
 
 /* ===================== Global state ===================== */
 extern Preferences prefs;
