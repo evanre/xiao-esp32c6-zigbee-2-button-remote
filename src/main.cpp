@@ -39,6 +39,7 @@ extern "C" void app_main()
   esp_log_level_set("*", ESP_LOG_INFO);
   delay(500);
   ESP_LOGI(TAG, "=== DEBUG MODE: Gestures test (no Zigbee) ===");
+  ESP_LOGI(TAG, "Auto-reset enabled! Upload should work without BOOT button now.");
   ESP_LOGI(TAG, "BTN1_PIN=%d, BTN2_PIN=%d", BTN1_PIN, BTN2_PIN);
   ESP_LOGI(TAG, "Waiting for button presses...");
 #else

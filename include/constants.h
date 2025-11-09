@@ -15,7 +15,7 @@
 #include "freertos/task.h"
 
 /* ===================== Debug Mode ===================== */
-constexpr bool DEBUG_MODE = true; // Set to true to test gestures without Zigbee (prints to Serial)
+#define DEBUG_MODE 1 // Set to 1 to test gestures without Zigbee (prints to Serial), 0 to enable Zigbee
 
 /* ===================== Pins ===================== */
 constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;  // XIAO ESP32-C6: D1 = GPIO1
