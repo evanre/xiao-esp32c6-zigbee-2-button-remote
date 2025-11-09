@@ -63,3 +63,4 @@ idf.py
 libdeps/
 .clangd/
 .clang-tidy
+managed_components/

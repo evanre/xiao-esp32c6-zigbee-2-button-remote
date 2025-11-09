@@ -1,4 +1,7 @@
-#include "constants.h"
+#include "router.h"
+#include "zigbee.h"
+
+#define TAG "ROUTER"
 
 static bool isHoldStart(ButtonEvent ev)
 {
@@ -17,9 +20,7 @@ static ButtonEvent matchingEnd(ButtonEvent startEv)
 static void sendAction(void (*callback)(LampId), LampId lampId, const char *msg)
 {
 #if DEBUG_MODE
-  Serial.print("[SEND]");
-  Serial.print(msg);
-  Serial.print(static_cast<uint8_t>(lampId));
+  ESP_LOGI(TAG, "[SEND] %s L%d", msg, static_cast<uint8_t>(lampId));
 #else
   callback(lampId);
 #endif

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(~/.platformio/penv/bin/platformio run:*)",
+      "Bash(kill:*)",
+      "Bash(~/.platformio/penv/bin/platformio device monitor:*)",
+      "Bash(stty:*)",
+      "Bash(timeout 5 cat:*)",
+      "Bash(~/.platformio/penv/bin/platformio device:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

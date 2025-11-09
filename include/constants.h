@@ -1,15 +1,27 @@
 #pragma once
-#include <Arduino.h>
-#include <Preferences.h>
-#include <Zigbee.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <algorithm>
+#include "nvs_flash.h"
+#include "nvs.h"
+// TODO: Add ESP-IDF Zigbee SDK support
+// #include "esp_zigbee_core.h"
+#include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_log.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /* ===================== Debug Mode ===================== */
 constexpr bool DEBUG_MODE = true; // Set to true to test gestures without Zigbee (prints to Serial)
 
 /* ===================== Pins ===================== */
-constexpr int BTN1_PIN = 1;          // XIAO ESP32-C6: D1 = GPIO1
-constexpr int BTN2_PIN = 2;          // XIAO ESP32-C6: D2 = GPIO2
-constexpr uint8_t VBAT_ADC_PIN = A0; // Battery voltage sense pin (adjust to match your board)
+constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;  // XIAO ESP32-C6: D1 = GPIO1
+constexpr gpio_num_t BTN2_PIN = GPIO_NUM_2;  // XIAO ESP32-C6: D2 = GPIO2
+constexpr adc_channel_t VBAT_ADC_CHANNEL = ADC_CHANNEL_0; // Battery voltage sense pin (adjust to match your board)
+constexpr adc_unit_t VBAT_ADC_UNIT = ADC_UNIT_1; // ADC unit for battery monitoring
 
 /* ===================== Timings (ms) ===================== */
 constexpr uint16_t DEBOUNCE_MS = 25;    // Button debounce time
@@ -53,16 +65,17 @@ constexpr uint16_t VBAT_MIN_MV = 0;            // Minimum valid battery voltage 
 constexpr uint16_t VBAT_MAX_MV = 5000;         // Maximum valid battery voltage (mV)
 
 /* ===================== Global state ===================== */
-extern Preferences prefs;
+extern nvs_handle_t g_nvs_handle;
 extern bool dir_up;        // true=up, false=down (toggles after each hold_stop)
 extern bool woke_by_timer; // heuristic: timer wake vs button wake
 extern bool pairing_mode;  // active pairing window
 extern uint32_t pairing_deadline_ms;
 
 /* ===================== Zigbee endpoints (clients) ===================== */
-extern ZigbeeSwitch lamp1; // EP_L1
-extern ZigbeeSwitch lamp2; // EP_L2
-extern ZigbeeSwitch lamp3; // EP_L3
+// TODO: Update with ESP-IDF Zigbee API
+// extern ZigbeeSwitch lamp1; // EP_L1
+// extern ZigbeeSwitch lamp2; // EP_L2
+// extern ZigbeeSwitch lamp3; // EP_L3
 enum class LampId : uint8_t
 {
   L1 = EP_L1,
@@ -94,13 +107,13 @@ enum class ButtonModeEnum : uint8_t
 
 struct BtnState
 {
-  int pin;
+  gpio_num_t pin;
   ButtonModeEnum state = ButtonModeEnum::IDLE;
   uint32_t t_press = 0;
   uint32_t t_release = 0;
   uint8_t clicks = 0;
 
-  explicit BtnState(int p) : pin(p) {}
+  explicit BtnState(gpio_num_t p) : pin(p) {}
 };
 
 extern BtnState b1;
@@ -144,3 +157,14 @@ void report_battery(uint16_t mv);
 // Pairing and sleep
 void enter_pairing_mode();
 void goto_sleep();
+
+/* ===================== Helper functions ===================== */
+// Timing helper (replaces millis())
+static inline uint32_t millis() {
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+// Delay helper (replaces delay())
+static inline void delay(uint32_t ms) {
+    vTaskDelay(pdMS_TO_TICKS(ms));
+}
