@@ -1,5 +1,11 @@
 #include "zigbee.h"
 
+#if !DEBUG_MODE
+#include "esp_zigbee_core.h"
+#include "zcl/esp_zigbee_zcl_command.h"
+#include "ha/esp_zigbee_ha_standard.h"
+#endif
+
 #define TAG "ZIGBEE"
 
 // Global storage
@@ -8,59 +14,135 @@ bool dir_up = true;
 bool woke_by_timer = false;
 bool pairing_mode = false;
 uint32_t pairing_deadline_ms = 0;
-
-// Zigbee client endpoints (On/Off + Level + ColorTemp)
-// TODO: Update with ESP-IDF Zigbee API
-// ZigbeeSwitch lamp1(EP_L1);
-// ZigbeeSwitch lamp2(EP_L2);
-// ZigbeeSwitch lamp3(EP_L3);
-
-// Array for easy dispatch (index 0 = EP_L1, index 1 = EP_L2, index 2 = EP_L3)
-// static ZigbeeSwitch *lamps[] = {&lamp1, &lamp2, &lamp3};
+bool zigbee_connected = false;
 
 static inline bool pinRead(gpio_num_t pin) { return gpio_get_level(pin) == 1; }
 
 // ADC handle for battery reading
 static adc_oneshot_unit_handle_t adc_handle = NULL;
 
-// Helper: validate and get lamp pointer
-// TODO: Update with ESP-IDF Zigbee API
-// static inline ZigbeeSwitch *getLamp(LampId id)
-// {
-//   uint8_t idx = static_cast<uint8_t>(id);
-//
-//   // Validate against LampId enum values
-//   if (id == LampId::L1 || id == LampId::L2 || id == LampId::L3)
-//   {
-//     return lamps[idx - 1];
-//   }
-//
-// #if DEBUG_MODE
-//   ESP_LOGE(TAG, "Invalid LampId: %d", idx);
-// #endif
-//   return nullptr;
-// }
+#if !DEBUG_MODE
+/* ===================== Zigbee Signal Handler ===================== */
+void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
+{
+  uint32_t *p_sg_p = signal_struct->p_app_signal;
+  esp_err_t err_status = signal_struct->esp_err_status;
+  esp_zb_app_signal_type_t sig_type = (esp_zb_app_signal_type_t)*p_sg_p;
+
+  switch (sig_type) {
+  case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
+    ESP_LOGI(TAG, "Zigbee stack initialized");
+    esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
+    break;
+
+  case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
+  case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
+    if (err_status == ESP_OK) {
+      ESP_LOGI(TAG, "Device started up in %s factory-reset mode",
+        esp_zb_bdb_is_factory_new() ? "" : "non");
+      if (esp_zb_bdb_is_factory_new()) {
+        ESP_LOGI(TAG, "Factory-new device - starting network steering for pairing");
+        pairing_mode = true;
+        pairing_deadline_ms = millis() + (STEER_SECONDS * 1000UL);
+        esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+      } else {
+        ESP_LOGI(TAG, "Device rebooted with existing network config");
+      }
+    } else {
+      ESP_LOGE(TAG, "Failed to initialize Zigbee stack (status: %s)",
+        esp_err_to_name(err_status));
+    }
+    break;
+
+  case ESP_ZB_BDB_SIGNAL_STEERING:
+    if (err_status == ESP_OK) {
+      esp_zb_ieee_addr_t extended_pan_id;
+      esp_zb_get_extended_pan_id(extended_pan_id);
+      ESP_LOGI(TAG, "Joined network successfully (Extended PAN ID: %02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x, PAN ID: 0x%04hx, Channel:%d, Short Address: 0x%04hx)",
+        extended_pan_id[7], extended_pan_id[6], extended_pan_id[5], extended_pan_id[4],
+        extended_pan_id[3], extended_pan_id[2], extended_pan_id[1], extended_pan_id[0],
+        esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
+      zigbee_connected = true;
+      pairing_mode = false;
+      // Turn off LED when successfully connected
+      gpio_set_level(LED_PIN, 0);
+      ESP_LOGI(TAG, "LED turned OFF - device connected");
+    } else {
+      ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
+      // Keep retrying during pairing window only
+      if (pairing_mode) {
+        esp_zb_scheduler_alarm((esp_zb_callback_t)esp_zb_bdb_start_top_level_commissioning,
+          ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
+      }
+    }
+    break;
+
+  case ESP_ZB_ZDO_SIGNAL_LEAVE:
+    ESP_LOGI(TAG, "Device left network - waiting for manual pairing sequence");
+    zigbee_connected = false;
+    // Do NOT automatically enter pairing mode
+    // User must manually trigger pairing with PAIRING_CLICKS (6+ rapid clicks)
+    break;
+
+  default:
+    ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s",
+      esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
+    break;
+  }
+}
+
+/* ===================== Create Switch Endpoint ===================== */
+static esp_zb_ep_list_t* create_switch_endpoint(uint8_t endpoint_id)
+{
+  esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
+
+  // Endpoint config - On/Off Switch device
+  esp_zb_endpoint_config_t endpoint_config = {
+    .endpoint = endpoint_id,
+    .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+    .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+    .app_device_version = 0,
+  };
+
+  // Create cluster list with CLIENT role clusters
+  esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
+
+  // Basic cluster (server role - provides device info)
+  esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(NULL);
+  esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)"DIY");
+  esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)"TwoBtnRemote");
+  esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+  // Identify cluster (server role)
+  esp_zb_cluster_list_add_identify_cluster(cluster_list,
+    esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+  // On/Off cluster (CLIENT role - sends commands)
+  esp_zb_cluster_list_add_on_off_cluster(cluster_list,
+    esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_ON_OFF), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+
+  // Level Control cluster (CLIENT role - sends commands)
+  esp_zb_cluster_list_add_level_cluster(cluster_list,
+    esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_LEVEL_CONTROL), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+
+  // Color Control cluster (CLIENT role - sends commands)
+  esp_zb_cluster_list_add_color_control_cluster(cluster_list,
+    esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
+
+  // Add endpoint to list
+  esp_zb_ep_list_add_ep(ep_list, cluster_list, endpoint_config);
+
+  return ep_list;
+}
+#endif // !DEBUG_MODE
 
 /* ===================== Zigbee init ===================== */
 void zigbeeInit()
 {
-  // TODO: Update with ESP-IDF Zigbee API
-  // Zigbee.begin(ZIGBEE_END_DEVICE);
-  //
-  // lamp1.setManufacturerAndModel("DIY", "TwoBtnRemote");
-  // lamp2.setManufacturerAndModel("DIY", "TwoBtnRemote");
-  // lamp3.setManufacturerAndModel("DIY", "TwoBtnRemote");
-  //
-  // Zigbee.addEndpoint(&lamp1);
-  // Zigbee.addEndpoint(&lamp2);
-  // Zigbee.addEndpoint(&lamp3);
-
-  ESP_LOGI(TAG, "Zigbee initialization placeholder");
-
-  // Initialize ADC for battery reading
+  // Initialize ADC for battery reading first
   adc_oneshot_unit_init_cfg_t adc_config = {
     .unit_id = VBAT_ADC_UNIT,
-    .clk_src = (adc_oneshot_clk_src_t)0,  // Use default clock source
+    .clk_src = (adc_oneshot_clk_src_t)0,
     .ulp_mode = ADC_ULP_MODE_DISABLE,
   };
   ESP_ERROR_CHECK(adc_oneshot_new_unit(&adc_config, &adc_handle));
@@ -70,6 +152,84 @@ void zigbeeInit()
     .bitwidth = ADC_BITWIDTH_12,
   };
   ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle, VBAT_ADC_CHANNEL, &chan_config));
+
+  // Initialize LED pin for pairing indication
+  gpio_config_t led_config = {
+    .pin_bit_mask = (1ULL << LED_PIN),
+    .mode = GPIO_MODE_OUTPUT,
+    .pull_up_en = GPIO_PULLUP_DISABLE,
+    .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    .intr_type = GPIO_INTR_DISABLE,
+  };
+  gpio_config(&led_config);
+  gpio_set_level(LED_PIN, 0); // LED off initially
+
+#if !DEBUG_MODE
+  ESP_LOGI(TAG, "Initializing Zigbee stack");
+
+  // Configure Zigbee platform
+  esp_zb_platform_config_t platform_config = {
+    .radio_config = {
+      .radio_mode = ZB_RADIO_MODE_NATIVE,
+    },
+    .host_config = {
+      .host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE,
+    },
+  };
+  ESP_ERROR_CHECK(esp_zb_platform_config(&platform_config));
+
+  // Configure network as End Device
+  esp_zb_cfg_t zigbee_config = {
+    .esp_zb_role = ESP_ZB_DEVICE_TYPE_ED,
+    .install_code_policy = false,
+    .nwk_cfg = {
+      .zed_cfg = {
+        .ed_timeout = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
+        .keep_alive = 3000,
+      },
+    },
+  };
+
+  // Initialize Zigbee stack
+  esp_zb_init(&zigbee_config);
+
+  // Create 3 switch endpoints
+  esp_zb_ep_list_t *ep_list_1 = create_switch_endpoint(EP_L1);
+  esp_zb_ep_list_t *ep_list_2 = create_switch_endpoint(EP_L2);
+  esp_zb_ep_list_t *ep_list_3 = create_switch_endpoint(EP_L3);
+
+  // Merge endpoint lists - manually add clusters from other lists
+  esp_zb_cluster_list_t *cluster_list_2 = esp_zb_ep_list_get_ep(ep_list_2, EP_L2);
+  esp_zb_endpoint_config_t endpoint_config_2 = {
+    .endpoint = EP_L2,
+    .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+    .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+    .app_device_version = 0,
+  };
+  esp_zb_ep_list_add_ep(ep_list_1, cluster_list_2, endpoint_config_2);
+
+  esp_zb_cluster_list_t *cluster_list_3 = esp_zb_ep_list_get_ep(ep_list_3, EP_L3);
+  esp_zb_endpoint_config_t endpoint_config_3 = {
+    .endpoint = EP_L3,
+    .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+    .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+    .app_device_version = 0,
+  };
+  esp_zb_ep_list_add_ep(ep_list_1, cluster_list_3, endpoint_config_3);
+
+  // Register device
+  esp_zb_device_register(ep_list_1);
+
+  // Register signal handler
+  esp_zb_core_action_handler_register(NULL);
+  esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
+
+  // Start Zigbee stack
+  ESP_ERROR_CHECK(esp_zb_start(false));
+  esp_zb_stack_main_loop();
+
+  ESP_LOGI(TAG, "Zigbee stack started");
+#endif
 }
 
 /* ===================== Battery ===================== */
@@ -213,147 +373,96 @@ bool get_dir()
 /* ===================== Commands ===================== */
 void cmd_toggle(LampId lampId)
 {
-  // TODO: Update with ESP-IDF Zigbee API
-  // ZigbeeSwitch *lamp = getLamp(lampId);
-  //
-  // if (!lamp)
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Invalid lamp ID for toggle");
-  // #endif
-  //   return;
-  // }
-  //
-  // #if !DEBUG_MODE
-  //   if (!lamp->lightToggle())
-  //   {
-  // #if DEBUG_MODE
-  //     ESP_LOGE(TAG, "Failed to send toggle command to lamp %d", static_cast<uint8_t>(lampId));
-  // #endif
-  //   }
-  // #else
-  //   lamp->lightToggle();
-  // #endif
+  uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-  ESP_LOGI(TAG, "cmd_toggle L%d", static_cast<uint8_t>(lampId));
+#if DEBUG_MODE
+  ESP_LOGI(TAG, "cmd_toggle L%d", endpoint);
+#else
+  // Send On/Off Toggle command via direct binding
+  esp_zb_zcl_on_off_cmd_t cmd = {};
+  cmd.zcl_basic_cmd.src_endpoint = endpoint;
+  cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
+  cmd.on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID;
+
+  ESP_LOGI(TAG, "Sending toggle from endpoint %d", endpoint);
+  esp_zb_zcl_on_off_cmd_req(&cmd);
+#endif
 }
 
 void cmd_level_start(LampId lampId)
 {
   bool up = get_dir();
-  // TODO: Update with ESP-IDF Zigbee API
-  // ZigbeeSwitch *lamp = getLamp(lampId);
-  //
-  // if (!lamp)
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Invalid lamp ID for level_start");
-  // #endif
-  //   return;
-  // }
-  //
-  // #if !DEBUG_MODE
-  //   bool success = up ? lamp->levelMoveUp() : lamp->levelMoveDown();
-  //   if (!success)
-  //   {
-  // #if DEBUG_MODE
-  //     ESP_LOGE(TAG, "Failed to send level move command to lamp %d", static_cast<uint8_t>(lampId));
-  // #endif
-  //   }
-  // #else
-  //   if (up)
-  //     lamp->levelMoveUp();
-  //   else
-  //     lamp->levelMoveDown();
-  // #endif
+  uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-  ESP_LOGI(TAG, "cmd_level_start L%d (%s)", static_cast<uint8_t>(lampId), up ? "UP" : "DOWN");
+#if DEBUG_MODE
+  ESP_LOGI(TAG, "cmd_level_start L%d (%s)", endpoint, up ? "UP" : "DOWN");
+#else
+  // Send Level Control Move command via direct binding
+  esp_zb_zcl_level_move_cmd_t cmd = {};
+  cmd.zcl_basic_cmd.src_endpoint = endpoint;
+  cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
+  cmd.move_mode = up ? 0x00 : 0x01; // 0=up, 1=down
+  cmd.rate = 50; // Rate of level change (units per second)
+
+  ESP_LOGI(TAG, "Sending level move %s from endpoint %d", up ? "UP" : "DOWN", endpoint);
+  esp_zb_zcl_level_move_cmd_req(&cmd);
+#endif
 }
 
 void cmd_level_stop(LampId lampId)
 {
-  // TODO: Update with ESP-IDF Zigbee API
-  // ZigbeeSwitch *lamp = getLamp(lampId);
-  //
-  // if (!lamp)
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Invalid lamp ID for level_stop");
-  // #endif
-  //   return;
-  // }
-  //
-  // #if !DEBUG_MODE
-  //   if (!lamp->levelStop())
-  //   {
-  // #if DEBUG_MODE
-  //     ESP_LOGE(TAG, "Failed to send level stop command to lamp %d", static_cast<uint8_t>(lampId));
-  // #endif
-  //   }
-  // #else
-  //   lamp->levelStop();
-  // #endif
+  uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-  ESP_LOGI(TAG, "cmd_level_stop L%d", static_cast<uint8_t>(lampId));
+#if DEBUG_MODE
+  ESP_LOGI(TAG, "cmd_level_stop L%d", endpoint);
+#else
+  // Send Level Control Stop command via direct binding
+  esp_zb_zcl_level_stop_cmd_t cmd = {};
+  cmd.zcl_basic_cmd.src_endpoint = endpoint;
+  cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
+
+  ESP_LOGI(TAG, "Sending level stop from endpoint %d", endpoint);
+  esp_zb_zcl_level_stop_cmd_req(&cmd);
+#endif
 }
 
 void cmd_ct_start(LampId lampId)
 {
   bool up = get_dir();
-  // TODO: Update with ESP-IDF Zigbee API
-  // ZigbeeSwitch *lamp = getLamp(lampId);
-  //
-  // if (!lamp)
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Invalid lamp ID for ct_start");
-  // #endif
-  //   return;
-  // }
-  //
-  // #if !DEBUG_MODE
-  //   bool success = up ? lamp->colorTempMoveUp() : lamp->colorTempMoveDown();
-  //   if (!success)
-  //   {
-  // #if DEBUG_MODE
-  //     ESP_LOGE(TAG, "Failed to send color temp move command to lamp %d", static_cast<uint8_t>(lampId));
-  // #endif
-  //   }
-  // #else
-  //   if (up)
-  //     lamp->colorTempMoveUp();
-  //   else
-  //     lamp->colorTempMoveDown();
-  // #endif
+  uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-  ESP_LOGI(TAG, "cmd_ct_start L%d (%s)", static_cast<uint8_t>(lampId), up ? "UP" : "DOWN");
+#if DEBUG_MODE
+  ESP_LOGI(TAG, "cmd_ct_start L%d (%s)", endpoint, up ? "UP" : "DOWN");
+#else
+  // Send Color Control Move Color Temperature command via direct binding
+  esp_zb_zcl_color_move_color_temperature_cmd_t cmd = {};
+  cmd.zcl_basic_cmd.src_endpoint = endpoint;
+  cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
+  cmd.move_mode = up ? 0x01 : 0x03; // 1=up (cooler), 3=down (warmer)
+  cmd.rate = 50; // Rate of color temp change (units per second)
+  cmd.color_temperature_minimum = 153; // Coolest (from lamp spec)
+  cmd.color_temperature_maximum = 370; // Warmest (from lamp spec)
+
+  ESP_LOGI(TAG, "Sending color temp move %s from endpoint %d", up ? "UP" : "DOWN", endpoint);
+  esp_zb_zcl_color_move_color_temperature_cmd_req(&cmd);
+#endif
 }
 
 void cmd_ct_stop(LampId lampId)
 {
-  // TODO: Update with ESP-IDF Zigbee API
-  // ZigbeeSwitch *lamp = getLamp(lampId);
-  //
-  // if (!lamp)
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Invalid lamp ID for ct_stop");
-  // #endif
-  //   return;
-  // }
-  //
-  // #if !DEBUG_MODE
-  //   if (!lamp->colorTempStop())
-  //   {
-  // #if DEBUG_MODE
-  //     ESP_LOGE(TAG, "Failed to send color temp stop command to lamp %d", static_cast<uint8_t>(lampId));
-  // #endif
-  //   }
-  // #else
-  //   lamp->colorTempStop();
-  // #endif
+  uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-  ESP_LOGI(TAG, "cmd_ct_stop L%d", static_cast<uint8_t>(lampId));
+#if DEBUG_MODE
+  ESP_LOGI(TAG, "cmd_ct_stop L%d", endpoint);
+#else
+  // Send Color Control Stop Move Step command via direct binding
+  esp_zb_zcl_color_stop_move_step_cmd_t cmd = {};
+  cmd.zcl_basic_cmd.src_endpoint = endpoint;
+  cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
+
+  ESP_LOGI(TAG, "Sending color temp stop from endpoint %d", endpoint);
+  esp_zb_zcl_color_stop_move_step_cmd_req(&cmd);
+#endif
 }
 
 void cmd_empty_action(LampId lampId)
@@ -365,40 +474,22 @@ void enter_pairing_mode(LampId lampId)
 {
   (void)lampId; // Unused parameter
 
+  ESP_LOGI(TAG, "[PAIRING] PAIRING_SEQUENCE detected - entering pairing mode");
+
   pairing_mode = true;
   pairing_deadline_ms = millis() + (STEER_SECONDS * 1000UL);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "[PAIRING] Entering pairing mode");
-#endif
+  ESP_LOGI(TAG, "[PAIRING] LED will start blinking in main loop");
 
-  // TODO: Update with ESP-IDF Zigbee API
-  // Wipe network state and re-start as End Device
-  // Zigbee.factoryReset();
-  // delay(ZIGBEE_REINIT_DELAY_MS);
-  //
-  // if (!Zigbee.begin(ZIGBEE_END_DEVICE))
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Failed to restart Zigbee after factory reset");
-  // #endif
-  //   pairing_mode = false;
-  //   return;
-  // }
-  //
-  // // Re-register endpoints
-  // Zigbee.addEndpoint(&lamp1);
-  // Zigbee.addEndpoint(&lamp2);
-  // Zigbee.addEndpoint(&lamp3);
-  //
-  // // Open network (steering window)
-  // if (!Zigbee.startSteering(STEER_SECONDS))
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Failed to start steering");
-  // #endif
-  //   pairing_mode = false;
-  // }
+#if !DEBUG_MODE
+  // Factory reset - clear network settings
+  // This will trigger ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START which will start steering
+  ESP_LOGI(TAG, "[PAIRING] Performing factory reset...");
+  esp_zb_factory_reset();
+  ESP_LOGI(TAG, "[PAIRING] Factory reset scheduled - device will restart and enter pairing");
+#else
+  ESP_LOGI(TAG, "[PAIRING] DEBUG MODE - LED will blink for %d seconds", STEER_SECONDS);
+#endif
 }
 
 /* ===================== Sleep ===================== */
@@ -416,14 +507,8 @@ void goto_sleep()
       ESP_GPIO_WAKEUP_GPIO_LOW);
   esp_sleep_enable_timer_wakeup(sleep_duration_us);
 
-  // Give stack time to flush TX
-  // TODO: Update with ESP-IDF Zigbee API
-  uint32_t t0 = millis();
-  while (millis() - t0 < ZIGBEE_FLUSH_DELAY_MS)
-  {
-    // Zigbee.run();
-    delay(ZIGBEE_FLUSH_INTERVAL_MS);
-  }
+  // Small delay for any pending TX
+  delay(ZIGBEE_FLUSH_DELAY_MS);
 
   ESP_LOGI(TAG, "Entering deep sleep");
   esp_deep_sleep_start();

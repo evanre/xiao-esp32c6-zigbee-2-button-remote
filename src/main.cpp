@@ -46,23 +46,12 @@ extern "C" void app_main()
   // Start Zigbee stack and register endpoints
   zigbeeInit();
 
-  // Give stack time to connect (first join may take longer)
-  // TODO: Update with ESP-IDF Zigbee API
-  // uint32_t t0 = millis();
-  bool connected = false;
-  // while (!Zigbee.connected() && millis() - t0 < ZIGBEE_CONNECT_TIMEOUT_MS)
-  // {
-  //   Zigbee.run();
-  //   delay(ZIGBEE_FLUSH_DELAY_MS);
-  // }
-  // connected = Zigbee.connected();
-
   // Timer wake → report battery and sleep
   if (woke_by_timer)
   {
     uint16_t mv = read_battery_mv();
     // Only report battery if connected, otherwise just sleep
-    if (connected)
+    if (zigbee_connected)
     {
       report_battery(mv);
     }
@@ -70,7 +59,7 @@ extern "C" void app_main()
   }
 
   // If not connected after timeout and not pairing, try to sleep and retry later
-  if (!connected && !pairing_mode)
+  if (!zigbee_connected && !pairing_mode)
   {
     // Connection failed, sleep and retry on next button press or timer wake
     goto_sleep();
@@ -79,29 +68,30 @@ extern "C" void app_main()
 
   // Main loop
   while (true) {
-#if !DEBUG_MODE
-    // Zigbee.run(); // TODO: Update with ESP-IDF Zigbee API
-#endif
-
-    // Keep awake during pairing window with non-blocking delay
+    // Keep awake during pairing window with LED blinking
     if (pairing_mode)
     {
       uint32_t now = millis();
 
       if (now < pairing_deadline_ms)
       {
-        // Non-blocking delay: only process if enough time has passed
+        // Non-blocking delay: blink LED every 500ms to indicate pairing mode
         if (now - last_pairing_loop_ms >= PAIRING_LOOP_DELAY_MS)
         {
           last_pairing_loop_ms = now;
-          // Could add additional pairing-related processing here
+          // Toggle LED for visual feedback
+          static bool led_state = false;
+          led_state = !led_state;
+          gpio_set_level(LED_PIN, led_state ? 1 : 0);
         }
         delay(10);
         continue;
       }
       else
       {
+        // Pairing timeout - turn off LED and sleep
         pairing_mode = false;
+        gpio_set_level(LED_PIN, 0);
         goto_sleep();
       }
     }

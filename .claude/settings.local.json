@@ -7,7 +7,10 @@
       "Bash(stty:*)",
       "Bash(timeout 5 cat:*)",
       "Bash(~/.platformio/penv/bin/platformio device:*)",
-      "Bash(timeout 3 cat:*)"
+      "Bash(timeout 3 cat:*)",
+      "Bash(cat:*)",
+      "Bash(lsof:*)",
+      "Bash(xargs kill -9)"
     ],
     "deny": [],
     "ask": []

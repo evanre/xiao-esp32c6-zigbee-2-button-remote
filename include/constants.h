@@ -4,8 +4,6 @@
 #include <algorithm>
 #include "nvs_flash.h"
 #include "nvs.h"
-// TODO: Add ESP-IDF Zigbee SDK support
-// #include "esp_zigbee_core.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
@@ -15,13 +13,14 @@
 #include "freertos/task.h"
 
 /* ===================== Debug Mode ===================== */
-#define DEBUG_MODE 1 // Set to 1 to test gestures without Zigbee (prints to Serial), 0 to enable Zigbee
+#define DEBUG_MODE 0 // Set to 1 to test gestures without Zigbee (prints to Serial), 0 to enable Zigbee
 
 /* ===================== Pins ===================== */
-constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;  // XIAO ESP32-C6: D1 = GPIO1
-constexpr gpio_num_t BTN2_PIN = GPIO_NUM_2;  // XIAO ESP32-C6: D2 = GPIO2
+constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;               // XIAO ESP32-C6: D1 = GPIO1
+constexpr gpio_num_t BTN2_PIN = GPIO_NUM_2;               // XIAO ESP32-C6: D2 = GPIO2
+constexpr gpio_num_t LED_PIN = GPIO_NUM_15;               // XIAO ESP32-C6: Built-in LED on GPIO15
 constexpr adc_channel_t VBAT_ADC_CHANNEL = ADC_CHANNEL_0; // Battery voltage sense pin (adjust to match your board)
-constexpr adc_unit_t VBAT_ADC_UNIT = ADC_UNIT_1; // ADC unit for battery monitoring
+constexpr adc_unit_t VBAT_ADC_UNIT = ADC_UNIT_1;          // ADC unit for battery monitoring
 
 /* ===================== Timings (ms) ===================== */
 constexpr uint16_t DEBOUNCE_MS = 25;    // Button debounce time
@@ -43,7 +42,7 @@ constexpr float ADC_CAL_K = 1.00f;         // Fine calibration factor (measure &
 constexpr uint8_t PING_INTERVAL_HOURS = 6; // Wake interval for battery report (maintains network presence)
 
 /* ===================== Pairing ===================== */
-constexpr uint8_t STEER_SECONDS = 180;    // Network steering duration (device discovery window)
+constexpr uint8_t STEER_SECONDS = 180;         // Network steering duration (device discovery window)
 constexpr uint16_t PAIRING_LOOP_DELAY_MS = 50; // Non-blocking delay for pairing mode loop
 
 /* ===================== Zigbee Constants ===================== */
@@ -53,16 +52,16 @@ constexpr uint16_t ZIGBEE_FLUSH_INTERVAL_MS = 5;     // Interval between Zigbee.
 constexpr uint16_t ZIGBEE_REINIT_DELAY_MS = 200;     // Delay after factory reset before reinit
 
 /* ===================== Battery ZCL Constants ===================== */
-constexpr uint16_t ZCL_VOLTAGE_SCALE = 100;    // ZCL BatteryVoltage units (tenths of volts)
-constexpr uint8_t ZCL_VOLTAGE_OFFSET = 50;     // Rounding offset for voltage conversion
-constexpr uint8_t ZCL_PERCENTAGE_SCALE = 2;    // ZCL percentage scale (half-percent units)
-constexpr uint8_t ZCL_PERCENTAGE_MAX = 200;    // ZCL max percentage value (100% * 2)
+constexpr uint16_t ZCL_VOLTAGE_SCALE = 100; // ZCL BatteryVoltage units (tenths of volts)
+constexpr uint8_t ZCL_VOLTAGE_OFFSET = 50;  // Rounding offset for voltage conversion
+constexpr uint8_t ZCL_PERCENTAGE_SCALE = 2; // ZCL percentage scale (half-percent units)
+constexpr uint8_t ZCL_PERCENTAGE_MAX = 200; // ZCL max percentage value (100% * 2)
 
 /* ===================== ADC Constants ===================== */
-constexpr uint16_t ADC_MAX_VALUE = 4095;       // 12-bit ADC maximum value
-constexpr uint16_t ADC_REF_MV = 3300;          // ADC reference voltage (mV)
-constexpr uint16_t VBAT_MIN_MV = 0;            // Minimum valid battery voltage (mV)
-constexpr uint16_t VBAT_MAX_MV = 5000;         // Maximum valid battery voltage (mV)
+constexpr uint16_t ADC_MAX_VALUE = 4095; // 12-bit ADC maximum value
+constexpr uint16_t ADC_REF_MV = 3300;    // ADC reference voltage (mV)
+constexpr uint16_t VBAT_MIN_MV = 0;      // Minimum valid battery voltage (mV)
+constexpr uint16_t VBAT_MAX_MV = 5000;   // Maximum valid battery voltage (mV)
 
 /* ===================== Global state ===================== */
 extern nvs_handle_t g_nvs_handle;
@@ -70,12 +69,10 @@ extern bool dir_up;        // true=up, false=down (toggles after each hold_stop)
 extern bool woke_by_timer; // heuristic: timer wake vs button wake
 extern bool pairing_mode;  // active pairing window
 extern uint32_t pairing_deadline_ms;
+extern bool zigbee_connected; // Zigbee network connection status
 
 /* ===================== Zigbee endpoints (clients) ===================== */
-// TODO: Update with ESP-IDF Zigbee API
-// extern ZigbeeSwitch lamp1; // EP_L1
-// extern ZigbeeSwitch lamp2; // EP_L2
-// extern ZigbeeSwitch lamp3; // EP_L3
+// Using ESP-IDF Zigbee SDK - endpoints created dynamically in zigbeeInit()
 enum class LampId : uint8_t
 {
   L1 = EP_L1,
@@ -160,11 +157,13 @@ void goto_sleep();
 
 /* ===================== Helper functions ===================== */
 // Timing helper (replaces millis())
-static inline uint32_t millis() {
-    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+static inline uint32_t millis()
+{
+  return (uint32_t)(esp_timer_get_time() / 1000ULL);
 }
 
 // Delay helper (replaces delay())
-static inline void delay(uint32_t ms) {
-    vTaskDelay(pdMS_TO_TICKS(ms));
+static inline void delay(uint32_t ms)
+{
+  vTaskDelay(pdMS_TO_TICKS(ms));
 }

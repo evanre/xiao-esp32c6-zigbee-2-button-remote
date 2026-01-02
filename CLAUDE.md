@@ -1,176 +1,156 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Agent instructions for working with this ESP32-C6 Zigbee remote firmware.
 
-## Project Overview
+## Quick Reference
 
-This is a battery-powered Zigbee remote control firmware for the XIAO ESP32-C6. It uses **ESP-IDF framework** (not Arduino) and controls up to 3 Zigbee devices with 2 physical buttons through sophisticated gesture detection.
-
-**CRITICAL**: This project was recently migrated from Arduino framework to ESP-IDF. The Zigbee functionality is currently stubbed out with TODO comments and needs ESP-IDF Zigbee SDK implementation.
+- **Framework**: ESP-IDF (not Arduino)
+- **Hardware**: XIAO ESP32-C6
+- **Status**: See [ROADMAP.md](ROADMAP.md) for current state and issues
+- **User Docs**: See [README.md](README.md) for features and usage
+- **Z2M Integration**: See [z2m/README.md](z2m/README.md) for Zigbee2MQTT setup
 
 ## Build Commands
 
 ```bash
-# Build the project
-~/.platformio/penv/bin/platformio run
-
-# Clean build
-~/.platformio/penv/bin/platformio run --target clean
-
-# Upload to device
-~/.platformio/penv/bin/platformio run --target upload
-
-# Open serial monitor
-~/.platformio/penv/bin/platformio device monitor
+~/.platformio/penv/bin/platformio run              # Build
+~/.platformio/penv/bin/platformio run --target upload  # Upload
+~/.platformio/penv/bin/platformio device monitor    # Monitor
 ```
 
 ## Architecture
 
-### Core State Machine Flow
+### File Structure
 
-The firmware operates in a tight loop with deep sleep between button events:
+```
+src/
+├── main.cpp      - Entry point (app_main), NVS init, main loop
+├── buttons.cpp   - Button state machine (debounce, gestures)
+├── router.cpp    - Event routing with combo detection
+└── zigbee.cpp    - Zigbee stack, commands, battery, sleep
 
-1. **Wake from deep sleep** (button press or 6-hour timer)
-2. **Button state machines** detect gestures (hold, click, multi-click)
-3. **Event router** multiplexes 2 buttons → 3 virtual endpoints (combo detection)
-4. **Zigbee commands** dispatched to appropriate lamp endpoint
-5. **Deep sleep** entered to conserve battery
+include/
+└── constants.h   - Shared declarations, timing constants
+
+z2m/
+├── converter.js  - Zigbee2MQTT external converter (COMPLETE)
+├── device-config.yaml - Alternative Z2M inline config
+└── README.md     - Z2M installation guide
+```
 
 ### Module Responsibilities
 
-**[src/main.cpp](src/main.cpp)** - Entry point (`app_main()`)
-- NVS initialization for persistent storage
-- Wake source heuristic (timer vs button)
-- Main loop with pairing mode handling
-- Calls into button handler and event router
+**src/main.cpp** - Main loop
+- NVS initialization
+- Wake source detection
+- Button polling loop
+- Calls `handleButton()` → `routeEvents()` → Zigbee commands
 
-**[src/buttons.cpp](src/buttons.cpp)** - Button state machine
-- Per-button state tracking (IDLE, HOLDING, CLICK_HOLDING, STUCK)
-- Debouncing (25ms default)
-- Multi-click detection (300ms window)
-- Hold detection (600ms threshold, 30s safety timeout)
-- Returns `ButtonEvent` enum for router
+**src/buttons.cpp** - State machine per button
+- States: IDLE, HOLDING, CLICK_HOLDING, STUCK
+- Detects: CLICK, DOUBLE_CLICK, TRIPLE_CLICK, HOLD_START/END, CLICK_HOLD_START/END
+- Returns `ButtonEvent` enum
 
-**[src/router.cpp](src/router.cpp)** - Event routing and combo detection
-- Combo detection: Both buttons within 80ms → Lamp 3 endpoint
-- Event buffering during combo window
-- Dispatches events to Zigbee command functions
-- Handles HOLD_END synchronization for combo holds
+**src/router.cpp** - Event multiplexing
+- 2 physical buttons → 3 virtual endpoints (Lamp 1, Lamp 2, Lamp 3)
+- Combo detection: both buttons within 80ms → endpoint 3
+- Dispatches to Zigbee command functions
 
-**[src/zigbee.cpp](src/zigbee.cpp)** - Zigbee control and peripherals
-- ADC oneshot API for battery voltage reading
-- NVS storage for direction toggle state
-- Battery percentage lookup table (Li-ion discharge curve)
-- Zigbee command stubs: `cmd_toggle()`, `cmd_level_start()`, `cmd_level_stop()`, `cmd_ct_start()`, `cmd_ct_stop()`
-- Deep sleep configuration with GPIO + timer wakeup
+**src/zigbee.cpp** - Zigbee + peripherals
+- Zigbee stack init (3 endpoints with OnOff + Level + ColorTemp clusters)
+- Commands: `cmd_toggle()`, `cmd_level_start/stop()`, `cmd_ct_start/stop()`
+- Battery ADC reading, percentage LUT, reporting
+- Deep sleep configuration (GPIO + timer wakeup)
 
-**[include/constants.h](include/constants.h)** - Shared declarations
-- All timing constants (debounce, combo, hold thresholds)
-- Pin definitions using ESP-IDF types (`gpio_num_t`, `adc_channel_t`)
-- Enums: `ButtonEvent`, `ButtonModeEnum`, `LampId`
-- Structs: `BtnState`, `EventRouter`
-- Helper functions: `millis()`, `delay()` (ESP-IDF wrappers)
-
-### ESP-IDF API Usage
-
-**GPIO**: `gpio_config()`, `gpio_get_level()` - Direct ESP-IDF GPIO driver
-**ADC**: `adc_oneshot_unit_handle_t`, `adc_oneshot_read()` - One-shot ADC reads
-**NVS**: `nvs_open()`, `nvs_get_u8()`, `nvs_set_u8()`, `nvs_commit()` - Persistent storage
-**Timing**: `esp_timer_get_time()` for millis(), `vTaskDelay()` for delays
-**Sleep**: `esp_deep_sleep_enable_gpio_wakeup()`, `esp_sleep_enable_timer_wakeup()`
-**Logging**: `ESP_LOGI()`, `ESP_LOGE()` with TAG definitions
+**include/constants.h** - Shared config
+- Timing: `DEBOUNCE_MS=25`, `COMBO_MS=80`, `PRESS_MS=300`, `HOLD_MS=600`
+- Pins: `BTN1_PIN=GPIO1`, `BTN2_PIN=GPIO2`
+- Enums: `ButtonEvent`, `LampId`
 
 ### Key Design Patterns
 
-**Combo Detection Algorithm**:
-- Both buttons report events into router's `ev1_pending`, `ev2_pending`
-- 80ms window (`COMBO_MS`) to detect simultaneous press
-- If events match → dispatch to Lamp 3, else dispatch to Lamp 1/2
-- Special handling for HOLD events: tracks both buttons' HOLD_END
+**Combo Detection**:
+- Both buttons within 80ms → dispatch to Endpoint 3 (Lamp 3)
+- Otherwise dispatch to Endpoint 1/2 (Lamp 1/2)
 
 **Direction Toggle**:
-- `dir_up` global persists in NVS
-- Toggles each time `cmd_level_start()` or `cmd_ct_start()` called
-- Allows alternating up/down without extra button
+- `dir_up` persists in NVS, toggles each hold
+- Allows alternating dim up/down without extra button
 
 **Power Management**:
-- Timer wake every 6 hours for battery report
-- GPIO wake on either button LOW
-- All button handling completes in < 1 second before sleep
-- DEBUG_MODE disables sleep for testing
+- Deep sleep between button presses
+- Wake on button GPIO or 6-hour timer (battery report)
+- `DEBUG_MODE=true` disables sleep for testing
 
-## Migration Status: Arduino → ESP-IDF
+### ESP-IDF API Usage
 
-**Completed**:
-- ✅ GPIO API (pinMode, digitalRead → gpio_config, gpio_get_level)
-- ✅ Serial logging (Serial.print → ESP_LOGI/ESP_LOGE)
-- ✅ Timing (millis, delay → esp_timer_get_time, vTaskDelay)
-- ✅ NVS storage (Preferences → nvs_*)
-- ✅ ADC (analogRead → adc_oneshot_read)
-- ✅ Deep sleep (native ESP-IDF API)
-
-**Pending**:
-- ⚠️ **Zigbee Stack**: All Zigbee API calls commented out with `// TODO: Update with ESP-IDF Zigbee API`
-  - Need to replace Arduino `Zigbee` library with ESP-IDF Zigbee SDK
-  - Managed components already present in `managed_components/espressif__esp-zboss-lib/`
-  - Key functions to implement:
-    - `zigbeeInit()`: Initialize Zigbee end device, register 3 endpoints
-    - `cmd_toggle()`, `cmd_level_*()`, `cmd_ct_*()`: Send ZCL commands
-    - `report_battery()`: Power Configuration cluster reporting
-    - `enter_pairing_mode()`: Factory reset + network steering
+- **GPIO**: `gpio_config()`, `gpio_get_level()`
+- **ADC**: `adc_oneshot_unit_handle_t`, `adc_oneshot_read()`
+- **NVS**: `nvs_open()`, `nvs_get_u8()`, `nvs_set_u8()`, `nvs_commit()`
+- **Timing**: `esp_timer_get_time()` for millis(), `vTaskDelay()` for delays
+- **Sleep**: `esp_deep_sleep_enable_gpio_wakeup()`, `esp_sleep_enable_timer_wakeup()`
+- **Logging**: `ESP_LOGI()`, `ESP_LOGE()` with TAG definitions
+- **FreeRTOS**: `xTaskCreate()`, `xSemaphoreTake()`, `xSemaphoreGive()`
 
 ## Configuration
 
-**Debug Mode** ([include/constants.h](include/constants.h)):
+**Debug Mode** (include/constants.h):
 ```cpp
-constexpr bool DEBUG_MODE = true;  // Enable logging, disable sleep/Zigbee
+constexpr bool DEBUG_MODE = true;  // Disable sleep/Zigbee, enable logging
 ```
 
-**Timing Tuning** ([include/constants.h](include/constants.h)):
-- `DEBOUNCE_MS = 25` - Increase if false triggers
-- `COMBO_MS = 80` - Time window for "simultaneous" button press
-- `PRESS_MS = 300` - Multi-click detection window
-- `HOLD_MS = 600` - Threshold for hold vs click
-- `PAIRING_CLICKS = 6` - Rapid clicks to enter pairing mode
-
-**Battery Calibration** ([include/constants.h](include/constants.h)):
+**Hardware Pins** (include/constants.h):
 ```cpp
-constexpr float VBAT_DIVIDER = 2.00f;  // Hardware voltage divider ratio
-constexpr float ADC_CAL_K = 1.00f;     // Fine calibration factor
+constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;
+constexpr gpio_num_t BTN2_PIN = GPIO_NUM_2;
+constexpr adc_channel_t BAT_ADC_CHANNEL = ADC_CHANNEL_0;
 ```
-Measure actual battery voltage, compare to reported, adjust `ADC_CAL_K = actual / reported`.
 
-## Hardware Mapping
+**Timing Tuning** (include/constants.h):
+- Increase `DEBOUNCE_MS` if false triggers
+- Increase `COMBO_MS` if combo hard to trigger
+- Increase `HOLD_MS` if holds trigger too easily
 
-- **Button 1**: GPIO1, controls Lamp 1 (Endpoint 1)
-- **Button 2**: GPIO2, controls Lamp 2 (Endpoint 2)
-- **Both buttons**: Controls Lamp 3 (Endpoint 3)
-- **Battery ADC**: ADC_CHANNEL_0 on ADC_UNIT_1 (typically A0)
-- **Button logic**: Active LOW with internal pull-ups
-
-## Common Development Workflows
+## Common Workflows
 
 ### Testing Gestures Without Zigbee
-1. Set `DEBUG_MODE = true` in [include/constants.h](include/constants.h)
+1. Set `DEBUG_MODE = true` in include/constants.h
 2. Build and upload
-3. Monitor serial output at 115200 baud
+3. Monitor serial at 115200 baud
 4. Press buttons to see event detection
 
-### Implementing Zigbee Functionality
-1. Search codebase for `// TODO: Update with ESP-IDF Zigbee API`
-2. Reference ESP-IDF Zigbee examples in `esp-idf/examples/zigbee/`
-3. Use managed components already installed: `espressif__esp-zboss-lib`
-4. Implement endpoint registration, ZCL command sending, and attribute reporting
-
 ### Adding New Gestures
-1. Define new `ButtonEvent` enum in [include/constants.h](include/constants.h)
-2. Implement detection logic in `handleButton()` in [src/buttons.cpp](src/buttons.cpp)
-3. Add dispatch case in `dispatch()` in [src/router.cpp](src/router.cpp)
-4. Implement command function in [src/zigbee.cpp](src/zigbee.cpp)
+1. Add `ButtonEvent` enum in include/constants.h
+2. Implement detection in `handleButton()` in src/buttons.cpp
+3. Add dispatch case in `routeEvents()` in src/router.cpp
+4. Implement command in src/zigbee.cpp
+
+### Fixing Issues
+Refer to [ROADMAP.md](ROADMAP.md) for:
+- Current blocking issues
+- Step-by-step fixes with code examples
+- Testing procedures
 
 ## Important Notes
 
-- **Global variable naming**: `g_nvs_handle` (not `nvs_handle`) to avoid name collision with deprecated typedef
-- **Build warnings**: ADC and unused variable warnings are expected during development
-- **Flash size**: Board configured for 2MB but sdkconfig expects 4MB (warning is benign)
-- **Main entry point**: ESP-IDF uses `extern "C" void app_main()` not `setup()`/`loop()`
+- **Main entry**: ESP-IDF uses `extern "C" void app_main()`, not `setup()`/`loop()`
+- **Global naming**: Use `g_nvs_handle` (not `nvs_handle`) to avoid typedef collision
+- **Build warnings**: ADC warnings are expected
+- **Flash size**: Board=2MB, sdkconfig=4MB warning is benign
+- **Model ID**: Must match between firmware (`src/zigbee.cpp:~200`) and Z2M converter (`z2m/converter.js:20`)
+
+## Zigbee2MQTT Integration
+
+**Status**: Converter complete and production-ready
+
+**Files**:
+- `z2m/converter.js` - External converter (3 endpoints, battery, actions)
+- `z2m/device-config.yaml` - Alternative inline config
+- `z2m/README.md` - Complete setup guide
+
+**Critical**: Device uses binding mode. Users must manually bind endpoints via Z2M UI:
+- Endpoint 1 → Lamp 1 (Button 1)
+- Endpoint 2 → Lamp 2 (Button 2)
+- Endpoint 3 → Lamp 3 (Both buttons)
+
+See [z2m/README.md](z2m/README.md) for installation and binding instructions.
