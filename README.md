@@ -1,6 +1,8 @@
-# XIAO ESP32-C6 Zigbee 2-Button Remote
+# XIAO ESP32-C6 Zigbee Button Remote
 
-Battery-powered Zigbee remote control for the XIAO ESP32-C6. Control up to 3 different Zigbee devices (smart lights) with sophisticated gesture detection using just 2 physical buttons.
+Battery-powered Zigbee remote control for the XIAO ESP32-C6. Control up to 3 different Zigbee devices (smart lights) with sophisticated gesture detection.
+
+**Current Configuration**: 2 physical buttons, 3 endpoints (button 1, button 2, combo). Future versions will support 1-4 buttons with configurable endpoint mappings.
 
 **Development Status**: See [ROADMAP.md](ROADMAP.md) for current implementation status and known issues.
 
@@ -274,13 +276,18 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture documentation.
 
 This project is open source. Use and modify as needed.
 
-## Contributing
+## Future Enhancements
 
-Contributions welcome! Areas for improvement:
+Planned improvements (see [ROADMAP.md](ROADMAP.md)):
+- **Configurable button mappings**: Support 1-4 buttons with custom endpoint configurations
 - Additional gesture types
 - OTA update support
 - Visual feedback (LED)
 - Power consumption optimization
+
+## Contributing
+
+Contributions welcome!
 
 ## Support
 

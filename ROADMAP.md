@@ -185,6 +185,85 @@ No firmware changes needed. Users must manually bind endpoints via Z2M UI.
 - Implement OTA handler
 - Test firmware updates
 
+## Phase 6: Configuration System (8-12 hours, FUTURE)
+
+**Objective**: Support multiple hardware configurations
+**Status**: 🔵 PLANNED - After Phase 1-2 complete and tested
+**Prerequisite**: Working firmware with threading issues resolved
+
+### Current Limitation
+Code is hardcoded for 2 buttons, 3 endpoints. Need to support:
+- 1-4 physical buttons
+- Configurable endpoint mappings
+- Combo detection on/off based on config
+
+### Task 6.1: Design Configuration System (2-3 hours)
+
+**Goal**: Compile-time configuration for different button layouts
+
+**Approach**:
+- `include/device_config.h` - Active config (single source of truth)
+- `configs/` directory with examples:
+  - `2btn_3ep.h` - Current (2 buttons, 3 endpoints with combo)
+  - `2btn_2ep.h` - 2 buttons, no combo (no 80ms delay)
+  - `1btn_1ep.h` - Single button
+  - `3btn_6ep.h` - 3 buttons with all combo permutations
+
+**Config structure**:
+```cpp
+#define NUM_BUTTONS 2
+static constexpr gpio_num_t BUTTON_PINS[] = {GPIO_NUM_1, GPIO_NUM_2};
+
+struct ButtonMapping {
+    uint8_t button_mask;  // Bitmask: 0b0001=btn1, 0b0011=btn1+btn2
+    uint8_t endpoint;
+};
+
+#define NUM_ENDPOINTS 3
+static constexpr ButtonMapping ENDPOINT_MAPPINGS[] = {
+    {0b0001, 1},  // Btn1 → EP1
+    {0b0010, 2},  // Btn2 → EP2
+    {0b0011, 3}   // Btn1+2 → EP3 (combo)
+};
+
+#define ENABLE_COMBO_DETECTION true
+#define COMBO_WINDOW_MS 80
+```
+
+**User workflow**:
+1. Copy example: `cp configs/2btn_3ep.h include/device_config.h`
+2. (Optional) Customize pins/mappings
+3. Build and flash
+
+### Task 6.2: Refactor Code for Dynamic Config (4-6 hours)
+
+**Files to modify**:
+- `src/buttons.cpp` - Dynamic button array from `BUTTON_PINS[]`
+- `src/router.cpp` - Mapping table lookup instead of hardcoded logic
+- `src/zigbee.cpp` - Create endpoints from `ENDPOINT_MAPPINGS[]`
+- `src/main.cpp` - Initialize from config
+
+**Optimization**: Compile-time dead code elimination (if no combos, no delay overhead)
+
+### Task 6.3: Documentation (2-3 hours)
+
+**Files**:
+- `CONFIG.md` - Configuration guide with examples
+- Update `README.md` - Mention configurable hardware support
+- Update `CLAUDE.md` - Document configuration architecture
+
+**Example configs to provide**:
+- **2btn_3ep**: Current implementation (btn1, btn2, btn1+2)
+- **2btn_2ep**: No combo (btn1, btn2)
+- **1btn_1ep**: Single button
+- **3btn_6ep**: 3 buttons + all combos (6 endpoints total)
+
+### Validation
+- [ ] All example configs compile successfully
+- [ ] Single-button config has no combo delay
+- [ ] 3-button config supports all 6 combo permutations
+- [ ] Z2M converter works with different endpoint counts
+
 ## Phase 4: Documentation & Testing (4-5 hours)
 
 **Objective**: Validate and document
