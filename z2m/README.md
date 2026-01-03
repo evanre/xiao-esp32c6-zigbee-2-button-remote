@@ -4,21 +4,21 @@ This directory contains Zigbee2MQTT (Z2M) integration files for the ESP32-C6 Two
 
 ## Implementation Status
 
-**Overall Status**: ✅ **COMPLETE** - Ready for testing
+**Overall Status**: ✅ **COMPLETE** - Ready for production use
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Device Converter | ✅ Complete | External converter with full feature support |
-| Device Configuration | ✅ Complete | Alternative inline config method |
-| Battery Reporting | ✅ Implemented | Auto-configured with bindings |
+| Battery Reporting | ✅ Implemented | Auto-configured during pairing |
 | Multi-Endpoint Support | ✅ Implemented | 3 endpoints properly defined |
 | Action Exposes | ✅ Implemented | All button gestures exposed |
-| Binding Configuration | ⚠️ Manual | User must create bindings via Z2M UI |
+| Coordinator Binding | ✅ Automatic | Auto-configured for action reporting |
+| Lamp Binding | ⚠️ Manual | User must bind to lamps via Z2M UI |
 | Documentation | ✅ Complete | This README |
 
 ## Files in This Directory
 
-### 1. `converter.js` - **RECOMMENDED METHOD**
+### `converter.js` - External Converter
 
 **Status**: ✅ Ready to use
 
@@ -28,47 +28,26 @@ This directory contains Zigbee2MQTT (Z2M) integration files for the ESP32-C6 Two
 - 3-endpoint device definition (Button 1, Button 2, Both buttons)
 - Battery voltage and percentage reporting
 - Command pass-through for all button gestures
-- Automatic binding configuration for battery reporting
+- Automatic coordinator binding for action reporting
 - Multi-endpoint support with proper routing
 
 **What It Does**:
-- Registers the device as "DIY-TwoBtnRemote" in Zigbee2MQTT
+- Registers any device with model "TwoBtnRemote" in Zigbee2MQTT
 - Exposes battery status in Home Assistant
 - Exposes action triggers for each endpoint
-- Configures battery reporting intervals automatically
+- Automatically binds endpoints to coordinator for event reporting
+- Configures battery reporting intervals
 
 **Implementation Details**:
 - Uses Zigbee Herdsman Converters library
 - FromZigbee: `battery`, `command_*` (on/off/toggle/move/stop/color_temp)
 - ToZigbee: None (device is command sender only)
-- Exposes: Battery (voltage + percentage) + 3 action enums (one per endpoint)
-
----
-
-### 2. `device-config.yaml` - **ALTERNATIVE METHOD**
-
-**Status**: ⚠️ Needs customization
-
-**Description**: Inline device configuration for Zigbee2MQTT `configuration.yaml`.
-
-**When to Use**:
-- If external converter doesn't work
-- For quick testing without converter installation
-- If you prefer inline configuration
-
-**⚠️ IMPORTANT**: You must replace the IEEE address `0x9888e0fffe7fa01c` with your actual device's IEEE address (found in Z2M logs during pairing).
+- Exposes: Battery (voltage + percentage) + action enum
+- Model matching: Firmware must set `MODEL_IDENTIFIER` to "TwoBtnRemote"
 
 ---
 
 ## Installation
-
-### Method 1: External Converter (Recommended)
-
-**Advantages**:
-- Cleaner configuration
-- Easier to update
-- Works for multiple devices
-- Standard Z2M approach
 
 **Steps**:
 
@@ -107,48 +86,6 @@ This directory contains Zigbee2MQTT (Z2M) integration files for the ESP32-C6 Two
 5. **Verify installation**:
    - Check Z2M logs for "Loaded external converter: diy_two_button_remote.js"
    - No errors about missing dependencies
-
----
-
-### Method 2: Inline Configuration (Alternative)
-
-**Use this if Method 1 doesn't work for you.**
-
-**Steps**:
-
-1. **Pair device first** (see Pairing section below)
-
-2. **Find device IEEE address**:
-   - Look in Z2M logs during pairing
-   - Or check Z2M web UI → Devices → your device
-   - Format: `0xXXXXXXXXXXXXXXXX` (16 hex digits)
-
-3. **Edit Z2M configuration**:
-
-   Open `configuration.yaml` and add under `devices:` section:
-   ```yaml
-   devices:
-     '0xYOUR_ACTUAL_IEEE_ADDRESS':  # ⚠️ Replace with your device's IEEE!
-       friendly_name: 'two_button_remote'
-       definition:
-         model: 'TwoBtnRemote'
-         vendor: 'DIY'
-         description: 'ESP32-C6 two-button Zigbee remote control'
-
-         exposes:
-           - type: battery
-             access: 1
-           - type: voltage
-             access: 1
-             property: voltage
-             unit: mV
-             value_min: 2500
-             value_max: 4200
-
-           # ... rest of config from device-config.yaml
-   ```
-
-4. **Restart Zigbee2MQTT**
 
 ---
 
@@ -203,22 +140,27 @@ This directory contains Zigbee2MQTT (Z2M) integration files for the ESP32-C6 Two
 
 ---
 
-## Binding Configuration (REQUIRED)
+## Binding Configuration
 
-**⚠️ CRITICAL**: This device uses **binding mode** for all commands. You **MUST** create bindings for the device to control lamps.
+**⚠️ CRITICAL**: This device uses **Zigbee binding** to send commands. You can create bindings to:
+- **Coordinator** - For action events to appear in Z2M/Home Assistant
+- **Lamps** - For direct local control (fast, works without coordinator)
+- **Both** (Recommended) - Get event reporting AND direct control simultaneously
 
 ### What are Bindings?
 
-Bindings tell the Zigbee network which device should receive commands from each endpoint of the remote. Without bindings, button presses will be logged but won't control any lights.
+Bindings are Zigbee routing rules that tell the device where to send its commands. A single endpoint can have **multiple bindings** to different devices. This allows the remote to control lamps directly while also reporting button presses to Z2M/HA.
 
 ### How to Create Bindings (Zigbee2MQTT Web UI)
+
+**Note**: The converter automatically binds endpoints to the coordinator for action reporting. You only need to manually create bindings to lamps for direct control.
 
 1. **Navigate to device**:
    - Open Zigbee2MQTT web UI
    - Go to "Devices" tab
    - Click on your "two_button_remote" device
 
-2. **Create bindings for each endpoint**:
+2. **Create bindings for each endpoint** (to lamps for direct control):
 
    **For Endpoint 1 (Button 1 → Lamp 1):**
    - Click "Bind" tab
@@ -238,8 +180,11 @@ Bindings tell the Zigbee network which device should receive commands from each 
    - Repeat above steps with "Endpoint: 3" → bind to Lamp 3
 
 3. **Verify bindings**:
-   - Bindings should appear in the "Bind" tab
-   - Test: Press button and verify lamp responds
+   - Bindings should appear in the "Bind" tab under each endpoint
+   - You should see bindings to BOTH coordinator (auto-created) AND lamps (manually created)
+   - Test: Press button and verify:
+     - Lamp responds immediately (direct control)
+     - Action appears in Z2M/HA logs (coordinator binding)
 
 ### Binding via MQTT (Alternative)
 
@@ -325,7 +270,11 @@ automation:
           brightness_step_pct: 10
 ```
 
-**Note**: If using bindings (recommended), the remote controls lights directly via Zigbee without going through Home Assistant. The action entities are for monitoring/logging only.
+**Important Notes**:
+- **Action events require binding to coordinator** - The converter automatically configures this during pairing
+- **Direct lamp control requires binding to lamps** - You must create these bindings manually (see Binding Configuration section)
+- **Best practice**: Use both types of bindings simultaneously for local control + event visibility
+- **Hybrid approach**: Bind to lamps for instant physical control, use HA automations for complex scenes/logic
 
 ---
 
@@ -494,7 +443,18 @@ esp_zb_cfg_basic_attr.model_identifier = "MyCustomRemote";  // Match converter
 
 ## Converter Version History
 
-**v1.0** (Current):
+**v1.2.0** (Current):
+- Fixed incorrect assumptions about binding and event reporting
+- Automatic coordinator binding for action events
+- Clarified that multiple bindings per endpoint are supported
+- Updated documentation to explain dual-binding pattern
+- Added error handling in configure function
+
+**v1.1.0**:
+- Attempted simplification (incorrect - removed useful features)
+- Removed action exposes (later restored in v1.2.0)
+
+**v1.0**:
 - Initial implementation
 - 3-endpoint support
 - Battery reporting
@@ -540,7 +500,7 @@ Improvements welcome!
 
 ---
 
-**Last Updated**: 2026-01-02
-**Converter Version**: 1.0
+**Last Updated**: 2026-01-03
+**Converter Version**: 1.2.0
 **Compatible Firmware**: ESP-IDF based (post-migration)
 **Zigbee2MQTT Version**: 1.35.0+ (tested on 1.38.0)

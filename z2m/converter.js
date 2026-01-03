@@ -1,16 +1,27 @@
 /**
  * Custom Zigbee2MQTT converter for DIY ESP32-C6 Two-Button Remote
  *
+ * Version: 1.2.0
+ * Device Model: TwoBtnRemote
+ * Compatible Firmware: ESP-IDF based (post v2.0)
+ * Zigbee2MQTT: 1.35.0+
+ *
  * Installation:
  * 1. Copy this file to your Zigbee2MQTT data directory (usually /opt/zigbee2mqtt/data)
  * 2. Add to configuration.yaml:
  *    external_converters:
  *      - diy_two_button_remote.js
  * 3. Restart Zigbee2MQTT
+ *
+ * Binding Configuration:
+ * - For direct lamp control: Bind endpoint to lamp endpoint (fast, local control)
+ * - For event reporting to HA: Bind endpoint to coordinator (actions appear in Z2M/HA)
+ * - Best practice: Bind BOTH - you get direct control AND event visibility
+ *
+ * Note: Multiple bindings per cluster are supported and recommended.
  */
 
 const fz = require('zigbee-herdsman-converters/converters/fromZigbee');
-const tz = require('zigbee-herdsman-converters/converters/toZigbee');
 const exposes = require('zigbee-herdsman-converters/lib/exposes');
 const reporting = require('zigbee-herdsman-converters/lib/reporting');
 const e = exposes.presets;
@@ -22,8 +33,8 @@ const definition = {
     vendor: 'DIY',
     description: 'ESP32-C6 two-button Zigbee remote with 3 virtual endpoints',
 
-    // This device has 3 client endpoints that send commands to bound lights
-    // It doesn't expose server attributes, so we mainly track battery
+    // Device has client endpoints that send commands
+    // Commands can be received via binding to coordinator for action reporting
     fromZigbee: [
         fz.battery,
         fz.command_on,
@@ -41,53 +52,50 @@ const definition = {
     exposes: [
         e.battery(),
         e.battery_voltage(),
-        // Add action exposes for each endpoint
-        exposes.enum('action_ep1', ea.STATE, [
+        // Action exposes for each endpoint
+        // Will report events if endpoints are bound to coordinator
+        e.action([
             'on', 'off', 'toggle',
             'brightness_move_up', 'brightness_move_down', 'brightness_stop',
             'color_temperature_move_up', 'color_temperature_move_down', 'color_temperature_stop'
-        ]).withEndpoint('1').withDescription('Actions from endpoint 1 (Button 1)'),
-        exposes.enum('action_ep2', ea.STATE, [
-            'on', 'off', 'toggle',
-            'brightness_move_up', 'brightness_move_down', 'brightness_stop',
-            'color_temperature_move_up', 'color_temperature_move_down', 'color_temperature_stop'
-        ]).withEndpoint('2').withDescription('Actions from endpoint 2 (Button 2)'),
-        exposes.enum('action_ep3', ea.STATE, [
-            'on', 'off', 'toggle',
-            'brightness_move_up', 'brightness_move_down', 'brightness_stop',
-            'color_temperature_move_up', 'color_temperature_move_down', 'color_temperature_stop'
-        ]).withEndpoint('3').withDescription('Actions from endpoint 3 (Both buttons)'),
+        ]),
     ],
 
     meta: {
         multiEndpoint: true,
+        multiEndpointSkip: ['battery', 'battery_voltage'],
     },
 
-    endpoint: (device) => {
-        return {
-            'ep1': 1,  // Button 1 -> Lamp 1
-            'ep2': 2,  // Button 2 -> Lamp 2
-            'ep3': 3,  // Both buttons -> Lamp 3
-        };
-    },
+    endpoint: (device) => ({
+        'ep1': 1,  // Button 1 -> Lamp 1
+        'ep2': 2,  // Button 2 -> Lamp 2
+        'ep3': 3,  // Both buttons -> Lamp 3
+    }),
 
     configure: async (device, coordinatorEndpoint, logger) => {
-        // Bind each endpoint for battery reporting
-        const endpoint1 = device.getEndpoint(1);
-        const endpoint2 = device.getEndpoint(2);
-        const endpoint3 = device.getEndpoint(3);
+        try {
+            const endpoint1 = device.getEndpoint(1);
+            const endpoint2 = device.getEndpoint(2);
+            const endpoint3 = device.getEndpoint(3);
 
-        // Bind power configuration cluster from endpoint 1 for battery reporting
-        await reporting.bind(endpoint1, coordinatorEndpoint, ['genPowerCfg']);
-        await reporting.batteryVoltage(endpoint1);
-        await reporting.batteryPercentageRemaining(endpoint1);
+            // Bind power configuration for battery reporting
+            await reporting.bind(endpoint1, coordinatorEndpoint, ['genPowerCfg']);
+            await reporting.batteryVoltage(endpoint1);
+            await reporting.batteryPercentageRemaining(endpoint1);
 
-        // Optional: Bind identify cluster for network management
-        await reporting.bind(endpoint1, coordinatorEndpoint, ['genIdentify']);
-        await reporting.bind(endpoint2, coordinatorEndpoint, ['genIdentify']);
-        await reporting.bind(endpoint3, coordinatorEndpoint, ['genIdentify']);
+            // Bind all endpoints to coordinator for action reporting to Z2M/HA
+            // Users can also bind to lamps for direct control - multiple bindings are supported
+            await reporting.bind(endpoint1, coordinatorEndpoint, ['genOnOff', 'genLevelCtrl', 'lightingColorCtrl']);
+            await reporting.bind(endpoint2, coordinatorEndpoint, ['genOnOff', 'genLevelCtrl', 'lightingColorCtrl']);
+            await reporting.bind(endpoint3, coordinatorEndpoint, ['genOnOff', 'genLevelCtrl', 'lightingColorCtrl']);
 
-        logger.info('DIY Two-Button Remote configured successfully');
+            logger.info('DIY Two-Button Remote configured successfully');
+            logger.info('Endpoints bound to coordinator for action reporting');
+            logger.info('Users can also bind endpoints to lamps for direct control');
+        } catch (error) {
+            logger.error(`Configuration failed: ${error}`);
+            // Don't throw - allow device to be usable even if binding fails
+        }
     },
 };
 
