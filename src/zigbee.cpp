@@ -16,6 +16,7 @@ bool pairing_mode = false;
 uint32_t pairing_deadline_ms = 0;
 bool zigbee_connected = false;
 TaskHandle_t zigbee_task_handle = NULL;
+TaskHandle_t led_task_handle = NULL;
 SemaphoreHandle_t zigbee_state_mutex = NULL;
 
 static inline bool pinRead(gpio_num_t pin) { return gpio_get_level(pin) == 1; }
@@ -23,7 +24,71 @@ static inline bool pinRead(gpio_num_t pin) { return gpio_get_level(pin) == 1; }
 // ADC handle for battery reading
 static adc_oneshot_unit_handle_t adc_handle = NULL;
 
+/* ===================== LED Blink Task ===================== */
+// Task that blinks LED while in pairing mode
+void led_blink_task(void *pvParameters)
+{
+  (void)pvParameters;
+  const uint32_t blink_interval_ms = 1000; // Blink every 1000ms (16 Hz)
+  bool led_state = false;
+
+  ESP_LOGI(TAG, "LED blink task started");
+
+  while (true) {
+    if (get_pairing_mode()) {
+      // In pairing mode - blink the LED
+      led_state = !led_state;
+      gpio_set_level(LED_PIN, led_state ? 1 : 0);
+      vTaskDelay(pdMS_TO_TICKS(blink_interval_ms));
+    } else {
+      // Not in pairing mode - turn LED off
+      gpio_set_level(LED_PIN, 0);
+      led_state = false;
+      // Check less frequently when not pairing
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+  }
+}
+
 #if !DEBUG_MODE
+/* ===================== Retry Pairing Wrapper ===================== */
+// Wrapper to avoid function pointer type warning
+static void retry_steering(uint8_t param)
+{
+  (void)param;  // Unused
+  esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
+}
+
+/* ===================== ZCL/ZDO Callback Handler ===================== */
+static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
+{
+  esp_err_t ret = ESP_OK;
+
+  switch (callback_id) {
+  case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
+    ESP_LOGI(TAG, "[ZCL] Attribute write received");
+    ret = ESP_OK;
+    break;
+
+  case ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID:
+    ESP_LOGI(TAG, "[ZCL] Read attribute response");
+    ret = ESP_OK;
+    break;
+
+  case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
+    ESP_LOGI(TAG, "[ZCL] Default response received");
+    ret = ESP_OK;
+    break;
+
+  default:
+    ESP_LOGI(TAG, "[ZCL/ZDO] Callback: 0x%04x", callback_id);
+    ret = ESP_OK;
+    break;
+  }
+
+  return ret;
+}
+
 /* ===================== Zigbee Signal Handler ===================== */
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 {
@@ -66,15 +131,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
       set_zigbee_connected(true);
       set_pairing_mode(false);
-      // Turn off LED when successfully connected
-      gpio_set_level(LED_PIN, 0);
-      ESP_LOGI(TAG, "LED turned OFF - device connected");
+      ESP_LOGI(TAG, "Device connected - LED blink task will turn off LED");
     } else {
       ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
       // Keep retrying during pairing window only
       if (get_pairing_mode()) {
-        esp_zb_scheduler_alarm((esp_zb_callback_t)esp_zb_bdb_start_top_level_commissioning,
-          ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
+        esp_zb_scheduler_alarm(retry_steering, 0, 1000);
       }
     }
     break;
@@ -87,48 +149,64 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
     break;
 
   default:
-    ESP_LOGI(TAG, "ZDO signal: %s (0x%x), status: %s",
-      esp_zb_zdo_signal_to_string(sig_type), sig_type, esp_err_to_name(err_status));
+    // Log all other signals (including binding-related ones)
+    const char* signal_name = esp_zb_zdo_signal_to_string(sig_type);
+    ESP_LOGI(TAG, "[SIGNAL] %s (0x%04x), status: %s",
+      signal_name, sig_type, esp_err_to_name(err_status));
+
+    // Provide additional context for binding-related signals
+    if (sig_type == 0x0021) {  // ESP_ZB_ZDO_SIGNAL_BIND (if available)
+      ESP_LOGI(TAG, "  └─ Binding operation detected!");
+    } else if (sig_type == 0x0022) {  // ESP_ZB_ZDO_SIGNAL_UNBIND (if available)
+      ESP_LOGI(TAG, "  └─ Unbinding operation detected!");
+    }
     break;
   }
 }
 
-/* ===================== Create Switch Endpoint ===================== */
-static esp_zb_ep_list_t* create_switch_endpoint(uint8_t endpoint_id)
+/* ===================== Create Switch Cluster List ===================== */
+static esp_zb_cluster_list_t* create_switch_cluster_list(uint8_t endpoint_id)
 {
-  esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
-
-  // Endpoint config - On/Off Switch device
-  esp_zb_endpoint_config_t endpoint_config = {
-    .endpoint = endpoint_id,
-    .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
-    .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
-    .app_device_version = 0,
-  };
-
   // Create cluster list with CLIENT role clusters
   esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
 
   // Basic cluster (server role - provides device info)
-  esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(NULL);
-  esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)"DIY");
-  esp_zb_basic_cluster_add_attr(basic_cluster, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)"TwoBtnRemote");
-  esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+  // Zigbee ZCL strings must be length-prefixed: first byte = length, then string
+  // Format: "\xNN""string" where NN is hex length of string
+  static const char manufacturer[] = "\x03""DIY";           // 3 characters
+  static const char model[] = "\x0c""TwoBtnRemote";          // 12 characters
+
+  // Create basic cluster with proper config including power source
+  esp_zb_basic_cluster_cfg_t basic_cfg = {
+    .zcl_version = ESP_ZB_ZCL_BASIC_ZCL_VERSION_DEFAULT_VALUE,
+    .power_source = 0x03,  // 0x03 = Battery (see ZCL spec)
+  };
+  esp_zb_attribute_list_t *basic_cluster = esp_zb_basic_cluster_create(&basic_cfg);
+
+  // Add manufacturer name and model identifier as ZCL string attributes
+  ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster,
+    ESP_ZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)manufacturer));
+  ESP_ERROR_CHECK(esp_zb_basic_cluster_add_attr(basic_cluster,
+    ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)model));
+
+  ESP_ERROR_CHECK(esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_cluster,
+    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE));
 
   // Identify cluster (server role)
   esp_zb_cluster_list_add_identify_cluster(cluster_list,
     esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
-  // Power Configuration cluster (server role - provides battery info)
-  // Note: Battery attributes are standard ZCL attributes (0x0020 = voltage, 0x0021 = percentage)
-  esp_zb_attribute_list_t *power_config_cluster = esp_zb_power_config_cluster_create(NULL);
-  // Add battery voltage attribute (0x0020) - in tenths of volts
-  uint8_t battery_voltage = 30;  // Default: 3.0V
-  esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0020, &battery_voltage);
-  // Add battery percentage attribute (0x0021) - in half-percent units (200 = 100%)
-  uint8_t battery_percentage = 200;  // Default: 100%
-  esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0021, &battery_percentage);
-  esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_config_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+  // Power Configuration cluster (server role - only on endpoint 1)
+  if (endpoint_id == EP_L1) {
+    esp_zb_attribute_list_t *power_config_cluster = esp_zb_power_config_cluster_create(NULL);
+    // Add battery voltage attribute (0x0020) - in tenths of volts
+    static uint8_t battery_voltage = 30;  // Default: 3.0V (static for persistence)
+    esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0020, &battery_voltage);
+    // Add battery percentage attribute (0x0021) - in half-percent units (200 = 100%)
+    static uint8_t battery_percentage = 200;  // Default: 100% (static for persistence)
+    esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0021, &battery_percentage);
+    esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_config_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+  }
 
   // On/Off cluster (CLIENT role - sends commands)
   esp_zb_cluster_list_add_on_off_cluster(cluster_list,
@@ -142,10 +220,7 @@ static esp_zb_ep_list_t* create_switch_endpoint(uint8_t endpoint_id)
   esp_zb_cluster_list_add_color_control_cluster(cluster_list,
     esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_COLOR_CONTROL), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
 
-  // Add endpoint to list
-  esp_zb_ep_list_add_ep(ep_list, cluster_list, endpoint_config);
-
-  return ep_list;
+  return cluster_list;
 }
 
 /* ===================== Zigbee Task Entry ===================== */
@@ -175,6 +250,14 @@ void zigbeeInit()
     }
   }
 
+#if !DEBUG_MODE
+  // Enable verbose logging for Zigbee stack (to see binding operations)
+  esp_log_level_set("ESP_ZB_APS", ESP_LOG_DEBUG);  // APS layer (includes binding)
+  esp_log_level_set("ESP_ZB_ZDO", ESP_LOG_DEBUG);  // ZDO layer (includes binding requests)
+  esp_log_level_set("ESP_ZB_ZCL", ESP_LOG_DEBUG);  // ZCL layer (includes commands)
+  ESP_LOGI(TAG, "Zigbee verbose logging enabled for binding visibility");
+#endif
+
   // Initialize ADC for battery reading first
   adc_oneshot_unit_init_cfg_t adc_config = {
     .unit_id = VBAT_ADC_UNIT,
@@ -200,6 +283,17 @@ void zigbeeInit()
   gpio_config(&led_config);
   gpio_set_level(LED_PIN, 0); // LED off initially
 
+  // Start LED blink task (runs in background, blinks during pairing)
+  xTaskCreate(
+    led_blink_task,           // Task function
+    "led_blink",              // Task name
+    2048,                     // Stack size (bytes)
+    NULL,                     // Parameters
+    5,                        // Priority
+    &led_task_handle          // Task handle
+  );
+  ESP_LOGI(TAG, "LED blink task created");
+
 #if !DEBUG_MODE
   ESP_LOGI(TAG, "Initializing Zigbee stack");
 
@@ -207,9 +301,11 @@ void zigbeeInit()
   esp_zb_platform_config_t platform_config = {
     .radio_config = {
       .radio_mode = ZB_RADIO_MODE_NATIVE,
+      .radio_uart_config = {},  // Not used in native mode
     },
     .host_config = {
       .host_connection_mode = ZB_HOST_CONNECTION_MODE_NONE,
+      .host_uart_config = {},  // Not used
     },
   };
   ESP_ERROR_CHECK(esp_zb_platform_config(&platform_config));
@@ -229,35 +325,44 @@ void zigbeeInit()
   // Initialize Zigbee stack
   esp_zb_init(&zigbee_config);
 
-  // Create 3 switch endpoints
-  esp_zb_ep_list_t *ep_list_1 = create_switch_endpoint(EP_L1);
-  esp_zb_ep_list_t *ep_list_2 = create_switch_endpoint(EP_L2);
-  esp_zb_ep_list_t *ep_list_3 = create_switch_endpoint(EP_L3);
+  // Create endpoint list and add all 3 endpoints
+  esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
 
-  // Merge endpoint lists - manually add clusters from other lists
-  esp_zb_cluster_list_t *cluster_list_2 = esp_zb_ep_list_get_ep(ep_list_2, EP_L2);
+  // Endpoint 1: Button 1 -> Lamp 1 (with battery reporting)
+  esp_zb_cluster_list_t *cluster_list_1 = create_switch_cluster_list(EP_L1);
+  esp_zb_endpoint_config_t endpoint_config_1 = {
+    .endpoint = EP_L1,
+    .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
+    .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
+    .app_device_version = 0,
+  };
+  esp_zb_ep_list_add_ep(ep_list, cluster_list_1, endpoint_config_1);
+
+  // Endpoint 2: Button 2 -> Lamp 2
+  esp_zb_cluster_list_t *cluster_list_2 = create_switch_cluster_list(EP_L2);
   esp_zb_endpoint_config_t endpoint_config_2 = {
     .endpoint = EP_L2,
     .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
     .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
     .app_device_version = 0,
   };
-  esp_zb_ep_list_add_ep(ep_list_1, cluster_list_2, endpoint_config_2);
+  esp_zb_ep_list_add_ep(ep_list, cluster_list_2, endpoint_config_2);
 
-  esp_zb_cluster_list_t *cluster_list_3 = esp_zb_ep_list_get_ep(ep_list_3, EP_L3);
+  // Endpoint 3: Both buttons -> Lamp 3
+  esp_zb_cluster_list_t *cluster_list_3 = create_switch_cluster_list(EP_L3);
   esp_zb_endpoint_config_t endpoint_config_3 = {
     .endpoint = EP_L3,
     .app_profile_id = ESP_ZB_AF_HA_PROFILE_ID,
     .app_device_id = ESP_ZB_HA_ON_OFF_SWITCH_DEVICE_ID,
     .app_device_version = 0,
   };
-  esp_zb_ep_list_add_ep(ep_list_1, cluster_list_3, endpoint_config_3);
+  esp_zb_ep_list_add_ep(ep_list, cluster_list_3, endpoint_config_3);
 
   // Register device
-  esp_zb_device_register(ep_list_1);
+  esp_zb_device_register(ep_list);
 
-  // Register signal handler
-  esp_zb_core_action_handler_register(NULL);
+  // Register action callback handler for ZCL/ZDO operations (including binding)
+  esp_zb_core_action_handler_register(zb_action_handler);
   esp_zb_set_primary_network_channel_set(ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK);
 
   // Start Zigbee stack
@@ -631,8 +736,8 @@ void enter_pairing_mode(LampId lampId)
 /* ===================== Sleep ===================== */
 void goto_sleep()
 {
-#if DEBUG_MODE
-  delay(10); // Don't sleep in debug mode
+#if DEBUG_MODE || DISABLE_SLEEP
+  delay(10); // Don't sleep when disabled
 #else
   const uint64_t us_per_hour = 3600ULL * 1000000ULL;
   const uint64_t sleep_duration_us = (uint64_t)PING_INTERVAL_HOURS * us_per_hour;

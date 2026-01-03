@@ -14,6 +14,7 @@
 
 /* ===================== Debug Mode ===================== */
 #define DEBUG_MODE 0 // Set to 1 to test gestures without Zigbee (prints to Serial), 0 to enable Zigbee
+#define DISABLE_SLEEP 1 // Set to 1 to prevent sleep during testing (allows continuous button testing with Zigbee enabled)
 
 /* ===================== Pins ===================== */
 constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;               // XIAO ESP32-C6: D1 = GPIO1

@@ -11,7 +11,9 @@
       "Bash(cat:*)",
       "Bash(lsof:*)",
       "Bash(xargs kill -9)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "mcp__context7__query-docs",
+      "Bash(command -v:*)"
     ],
     "deny": [],
     "ask": []

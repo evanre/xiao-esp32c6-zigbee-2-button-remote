@@ -126,7 +126,11 @@ extern "C" void app_main()
     routeEvents(ev1, ev2);
 
 #if !DEBUG_MODE
+#if !DISABLE_SLEEP
     goto_sleep();
+#else
+    delay(10);  // Small delay when sleep disabled to not spin too fast
+#endif
 #else
     delay(10);  // Small delay in debug mode to not spin too fast
 #endif
