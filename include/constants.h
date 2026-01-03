@@ -71,6 +71,12 @@ extern bool pairing_mode;  // active pairing window
 extern uint32_t pairing_deadline_ms;
 extern bool zigbee_connected; // Zigbee network connection status
 
+/* ===================== Zigbee Task ===================== */
+extern TaskHandle_t zigbee_task_handle;
+
+/* ===================== Thread Synchronization ===================== */
+extern SemaphoreHandle_t zigbee_state_mutex;
+
 /* ===================== Zigbee endpoints (clients) ===================== */
 // Using ESP-IDF Zigbee SDK - endpoints created dynamically in zigbeeInit()
 enum class LampId : uint8_t
@@ -137,6 +143,15 @@ void sendAction(LampId lamp, ButtonEvent ev);
 
 /* ===================== Zigbee / control API ===================== */
 void zigbeeInit();
+void zigbee_task_entry(void *pvParameters);
+
+// Thread-safe accessors for shared state
+bool get_zigbee_connected();
+void set_zigbee_connected(bool connected);
+bool get_pairing_mode();
+void set_pairing_mode(bool mode);
+uint32_t get_pairing_deadline();
+void set_pairing_deadline(uint32_t deadline);
 
 // On/Off, Level, Color Temperature commands
 void cmd_toggle(LampId lampId);

@@ -32,8 +32,15 @@ extern "C" void app_main()
   // Initialize buttons first (needed for GPIO)
   initButtons();
 
-  // Heuristic wake source
-  woke_by_timer = (gpio_get_level(BTN1_PIN) == 1 && gpio_get_level(BTN2_PIN) == 1);
+  // Determine wake source using proper API
+  esp_sleep_wakeup_cause_t wakeup_cause = esp_sleep_get_wakeup_cause();
+  woke_by_timer = (wakeup_cause == ESP_SLEEP_WAKEUP_TIMER);
+
+  ESP_LOGI(TAG, "Wake source: %s",
+    wakeup_cause == ESP_SLEEP_WAKEUP_TIMER ? "Timer" :
+    wakeup_cause == ESP_SLEEP_WAKEUP_GPIO ? "GPIO (Button)" :
+    wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED ? "Power-on/Reset" :
+    "Other");
 
 #if DEBUG_MODE
   esp_log_level_set("*", ESP_LOG_INFO);
@@ -43,15 +50,26 @@ extern "C" void app_main()
   ESP_LOGI(TAG, "BTN1_PIN=%d, BTN2_PIN=%d", BTN1_PIN, BTN2_PIN);
   ESP_LOGI(TAG, "Waiting for button presses...");
 #else
-  // Start Zigbee stack and register endpoints
-  zigbeeInit();
+  // Start Zigbee stack in separate FreeRTOS task (non-blocking)
+  ESP_LOGI(TAG, "Creating Zigbee task");
+  xTaskCreate(zigbee_task_entry, "zigbee", 4096, NULL, 5, &zigbee_task_handle);
+
+  // Give Zigbee task time to initialize
+  delay(100);
 
   // Timer wake → report battery and sleep
   if (woke_by_timer)
   {
+    // Wait for Zigbee connection before reporting (with timeout)
+    uint32_t wait_start = millis();
+    while (!get_zigbee_connected() && (millis() - wait_start) < ZIGBEE_CONNECT_TIMEOUT_MS)
+    {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
     uint16_t mv = read_battery_mv();
     // Only report battery if connected, otherwise just sleep
-    if (zigbee_connected)
+    if (get_zigbee_connected())
     {
       report_battery(mv);
     }
@@ -59,9 +77,16 @@ extern "C" void app_main()
   }
 
   // If not connected after timeout and not pairing, try to sleep and retry later
-  if (!zigbee_connected && !pairing_mode)
+  uint32_t connect_wait_start = millis();
+  while (!get_zigbee_connected() && !get_pairing_mode() && (millis() - connect_wait_start) < ZIGBEE_CONNECT_TIMEOUT_MS)
+  {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  if (!get_zigbee_connected() && !get_pairing_mode())
   {
     // Connection failed, sleep and retry on next button press or timer wake
+    ESP_LOGI(TAG, "Zigbee connection timeout - entering sleep");
     goto_sleep();
   }
 #endif
@@ -69,11 +94,11 @@ extern "C" void app_main()
   // Main loop
   while (true) {
     // Keep awake during pairing window with LED blinking
-    if (pairing_mode)
+    if (get_pairing_mode())
     {
       uint32_t now = millis();
 
-      if (now < pairing_deadline_ms)
+      if (now < get_pairing_deadline())
       {
         // Non-blocking delay: blink LED every 500ms to indicate pairing mode
         if (now - last_pairing_loop_ms >= PAIRING_LOOP_DELAY_MS)
@@ -90,7 +115,7 @@ extern "C" void app_main()
       else
       {
         // Pairing timeout - turn off LED and sleep
-        pairing_mode = false;
+        set_pairing_mode(false);
         gpio_set_level(LED_PIN, 0);
         goto_sleep();
       }
@@ -105,5 +130,8 @@ extern "C" void app_main()
 #else
     delay(10);  // Small delay in debug mode to not spin too fast
 #endif
+
+    // Yield to allow other tasks (like Zigbee task) to run
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }

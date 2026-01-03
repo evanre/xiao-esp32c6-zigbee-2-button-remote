@@ -15,6 +15,8 @@ bool woke_by_timer = false;
 bool pairing_mode = false;
 uint32_t pairing_deadline_ms = 0;
 bool zigbee_connected = false;
+TaskHandle_t zigbee_task_handle = NULL;
+SemaphoreHandle_t zigbee_state_mutex = NULL;
 
 static inline bool pinRead(gpio_num_t pin) { return gpio_get_level(pin) == 1; }
 
@@ -42,8 +44,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         esp_zb_bdb_is_factory_new() ? "" : "non");
       if (esp_zb_bdb_is_factory_new()) {
         ESP_LOGI(TAG, "Factory-new device - starting network steering for pairing");
-        pairing_mode = true;
-        pairing_deadline_ms = millis() + (STEER_SECONDS * 1000UL);
+        set_pairing_mode(true);
+        set_pairing_deadline(millis() + (STEER_SECONDS * 1000UL));
         esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
       } else {
         ESP_LOGI(TAG, "Device rebooted with existing network config");
@@ -62,15 +64,15 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
         extended_pan_id[7], extended_pan_id[6], extended_pan_id[5], extended_pan_id[4],
         extended_pan_id[3], extended_pan_id[2], extended_pan_id[1], extended_pan_id[0],
         esp_zb_get_pan_id(), esp_zb_get_current_channel(), esp_zb_get_short_address());
-      zigbee_connected = true;
-      pairing_mode = false;
+      set_zigbee_connected(true);
+      set_pairing_mode(false);
       // Turn off LED when successfully connected
       gpio_set_level(LED_PIN, 0);
       ESP_LOGI(TAG, "LED turned OFF - device connected");
     } else {
       ESP_LOGI(TAG, "Network steering was not successful (status: %s)", esp_err_to_name(err_status));
       // Keep retrying during pairing window only
-      if (pairing_mode) {
+      if (get_pairing_mode()) {
         esp_zb_scheduler_alarm((esp_zb_callback_t)esp_zb_bdb_start_top_level_commissioning,
           ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
       }
@@ -79,7 +81,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
 
   case ESP_ZB_ZDO_SIGNAL_LEAVE:
     ESP_LOGI(TAG, "Device left network - waiting for manual pairing sequence");
-    zigbee_connected = false;
+    set_zigbee_connected(false);
     // Do NOT automatically enter pairing mode
     // User must manually trigger pairing with PAIRING_CLICKS (6+ rapid clicks)
     break;
@@ -117,6 +119,17 @@ static esp_zb_ep_list_t* create_switch_endpoint(uint8_t endpoint_id)
   esp_zb_cluster_list_add_identify_cluster(cluster_list,
     esp_zb_identify_cluster_create(NULL), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
+  // Power Configuration cluster (server role - provides battery info)
+  // Note: Battery attributes are standard ZCL attributes (0x0020 = voltage, 0x0021 = percentage)
+  esp_zb_attribute_list_t *power_config_cluster = esp_zb_power_config_cluster_create(NULL);
+  // Add battery voltage attribute (0x0020) - in tenths of volts
+  uint8_t battery_voltage = 30;  // Default: 3.0V
+  esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0020, &battery_voltage);
+  // Add battery percentage attribute (0x0021) - in half-percent units (200 = 100%)
+  uint8_t battery_percentage = 200;  // Default: 100%
+  esp_zb_power_config_cluster_add_attr(power_config_cluster, 0x0021, &battery_percentage);
+  esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_config_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
   // On/Off cluster (CLIENT role - sends commands)
   esp_zb_cluster_list_add_on_off_cluster(cluster_list,
     esp_zb_zcl_attr_list_create(ESP_ZB_ZCL_CLUSTER_ID_ON_OFF), ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
@@ -134,11 +147,34 @@ static esp_zb_ep_list_t* create_switch_endpoint(uint8_t endpoint_id)
 
   return ep_list;
 }
+
+/* ===================== Zigbee Task Entry ===================== */
+void zigbee_task_entry(void *pvParameters)
+{
+  (void)pvParameters; // Unused parameter
+
+  ESP_LOGI(TAG, "Zigbee task starting");
+
+  // Call the blocking zigbeeInit() - this will run the Zigbee stack main loop
+  zigbeeInit();
+
+  // If we ever return from zigbeeInit (which shouldn't happen), delete the task
+  ESP_LOGE(TAG, "Zigbee task unexpectedly exited");
+  vTaskDelete(NULL);
+}
 #endif // !DEBUG_MODE
 
 /* ===================== Zigbee init ===================== */
 void zigbeeInit()
 {
+  // Create mutex for thread synchronization
+  if (zigbee_state_mutex == NULL) {
+    zigbee_state_mutex = xSemaphoreCreateMutex();
+    if (zigbee_state_mutex == NULL) {
+      ESP_LOGE(TAG, "Failed to create zigbee_state_mutex");
+    }
+  }
+
   // Initialize ADC for battery reading first
   adc_oneshot_unit_init_cfg_t adc_config = {
     .unit_id = VBAT_ADC_UNIT,
@@ -230,6 +266,73 @@ void zigbeeInit()
 
   ESP_LOGI(TAG, "Zigbee stack started");
 #endif
+}
+
+/* ===================== Thread-Safe Accessors ===================== */
+bool get_zigbee_connected()
+{
+  if (zigbee_state_mutex == NULL) {
+    return zigbee_connected; // Fallback if mutex not initialized
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  bool result = zigbee_connected;
+  xSemaphoreGive(zigbee_state_mutex);
+  return result;
+}
+
+void set_zigbee_connected(bool connected)
+{
+  if (zigbee_state_mutex == NULL) {
+    zigbee_connected = connected; // Fallback if mutex not initialized
+    return;
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  zigbee_connected = connected;
+  xSemaphoreGive(zigbee_state_mutex);
+}
+
+bool get_pairing_mode()
+{
+  if (zigbee_state_mutex == NULL) {
+    return pairing_mode; // Fallback if mutex not initialized
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  bool result = pairing_mode;
+  xSemaphoreGive(zigbee_state_mutex);
+  return result;
+}
+
+void set_pairing_mode(bool mode)
+{
+  if (zigbee_state_mutex == NULL) {
+    pairing_mode = mode; // Fallback if mutex not initialized
+    return;
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  pairing_mode = mode;
+  xSemaphoreGive(zigbee_state_mutex);
+}
+
+uint32_t get_pairing_deadline()
+{
+  if (zigbee_state_mutex == NULL) {
+    return pairing_deadline_ms; // Fallback if mutex not initialized
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  uint32_t result = pairing_deadline_ms;
+  xSemaphoreGive(zigbee_state_mutex);
+  return result;
+}
+
+void set_pairing_deadline(uint32_t deadline)
+{
+  if (zigbee_state_mutex == NULL) {
+    pairing_deadline_ms = deadline; // Fallback if mutex not initialized
+    return;
+  }
+  xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  pairing_deadline_ms = deadline;
+  xSemaphoreGive(zigbee_state_mutex);
 }
 
 /* ===================== Battery ===================== */
@@ -345,29 +448,62 @@ void report_battery(uint16_t mv)
   uint8_t zcl_voltage = (uint8_t)((mv + ZCL_VOLTAGE_OFFSET) / ZCL_VOLTAGE_SCALE);
   uint8_t zcl_pct = (uint8_t)(std::min<uint16_t>(pct * ZCL_PERCENTAGE_SCALE, ZCL_PERCENTAGE_MAX));
 
-  // Report from EP1 to coordinator
-  // TODO: Update with ESP-IDF Zigbee API
-  // if (!Zigbee.reportPowerConfiguration(EP_L1, zcl_voltage, zcl_pct))
-  // {
-  // #if DEBUG_MODE
-  //   ESP_LOGE(TAG, "Failed to report battery");
-  // #endif
-  // }
+  ESP_LOGI(TAG, "[BATTERY] Reporting: %dmV (%d%%) -> ZCL: voltage=%d, pct=%d", mv, pct, zcl_voltage, zcl_pct);
+
+  // Update battery voltage attribute (0x0020)
+  esp_err_t err = esp_zb_zcl_set_attribute_val(
+    EP_L1,
+    ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+    0x0020,  // ZCL_POWER_CONFIG_BATTERY_VOLTAGE attribute
+    &zcl_voltage,
+    false  // Don't check access rights
+  );
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set battery voltage attribute: %s", esp_err_to_name(err));
+  }
+
+  // Update battery percentage attribute (0x0021)
+  err = esp_zb_zcl_set_attribute_val(
+    EP_L1,
+    ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+    ESP_ZB_ZCL_CLUSTER_SERVER_ROLE,
+    0x0021,  // ZCL_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING attribute
+    &zcl_pct,
+    false  // Don't check access rights
+  );
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to set battery percentage attribute: %s", esp_err_to_name(err));
+  }
+
+  ESP_LOGI(TAG, "[BATTERY] Attributes updated successfully");
 #endif
 }
 
 /* ===================== Helpers ====================== */
 bool get_dir()
 {
+  // Protect dir_up access with mutex
+  if (zigbee_state_mutex != NULL) {
+    xSemaphoreTake(zigbee_state_mutex, portMAX_DELAY);
+  }
+
   dir_up = !dir_up;
   uint8_t val = dir_up ? 1 : 0;
+  bool result = dir_up;
+
+  if (zigbee_state_mutex != NULL) {
+    xSemaphoreGive(zigbee_state_mutex);
+  }
+
   esp_err_t err = nvs_set_u8(g_nvs_handle, "dir_up", val);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to save direction: %s", esp_err_to_name(err));
   } else {
     nvs_commit(g_nvs_handle);
   }
-  return dir_up;
+
+  return result;
 }
 
 /* ===================== Commands ===================== */
@@ -476,8 +612,8 @@ void enter_pairing_mode(LampId lampId)
 
   ESP_LOGI(TAG, "[PAIRING] PAIRING_SEQUENCE detected - entering pairing mode");
 
-  pairing_mode = true;
-  pairing_deadline_ms = millis() + (STEER_SECONDS * 1000UL);
+  set_pairing_mode(true);
+  set_pairing_deadline(millis() + (STEER_SECONDS * 1000UL));
 
   ESP_LOGI(TAG, "[PAIRING] LED will start blinking in main loop");
 
