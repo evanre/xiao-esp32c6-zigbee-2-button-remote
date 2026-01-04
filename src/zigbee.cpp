@@ -1,10 +1,8 @@
 #include "zigbee.h"
-
-#if !DEBUG_MODE
+#include "debug.h"
 #include "esp_zigbee_core.h"
 #include "zcl/esp_zigbee_zcl_command.h"
 #include "ha/esp_zigbee_ha_standard.h"
-#endif
 
 #define TAG "ZIGBEE"
 
@@ -50,12 +48,12 @@ void led_blink_task(void *pvParameters)
   }
 }
 
-#if !DEBUG_MODE
 /* ===================== Retry Pairing Wrapper ===================== */
 // Wrapper to avoid function pointer type warning
 static void retry_steering(uint8_t param)
 {
   (void)param;  // Unused
+  DEBUG_LOG_ZIGBEE(TAG, "Retrying network steering...");
   esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
 }
 
@@ -66,22 +64,22 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
   switch (callback_id) {
   case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
-    ESP_LOGI(TAG, "[ZCL] Attribute write received");
+    DEBUG_LOG_ZIGBEE(TAG, "Attribute write received");
     ret = ESP_OK;
     break;
 
   case ESP_ZB_CORE_CMD_READ_ATTR_RESP_CB_ID:
-    ESP_LOGI(TAG, "[ZCL] Read attribute response");
+    DEBUG_LOG_ZIGBEE(TAG, "Read attribute response");
     ret = ESP_OK;
     break;
 
   case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
-    ESP_LOGI(TAG, "[ZCL] Default response received");
+    DEBUG_LOG_ZIGBEE(TAG, "Default response received");
     ret = ESP_OK;
     break;
 
   default:
-    ESP_LOGI(TAG, "[ZCL/ZDO] Callback: 0x%04x", callback_id);
+    DEBUG_LOG_ZIGBEE(TAG, "Callback: 0x%04x", callback_id);
     ret = ESP_OK;
     break;
   }
@@ -151,15 +149,22 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct)
   default:
     // Log all other signals (including binding-related ones)
     const char* signal_name = esp_zb_zdo_signal_to_string(sig_type);
+
+    // Always log signal in normal mode
     ESP_LOGI(TAG, "[SIGNAL] %s (0x%04x), status: %s",
       signal_name, sig_type, esp_err_to_name(err_status));
 
-    // Provide additional context for binding-related signals
-    if (sig_type == 0x0021) {  // ESP_ZB_ZDO_SIGNAL_BIND (if available)
+    // Enhanced debug logging for binding operations
+    if (sig_type == 0x0021) {  // ESP_ZB_ZDO_SIGNAL_BIND
+      DEBUG_LOG_BINDING(TAG, "Binding request received!");
       ESP_LOGI(TAG, "  └─ Binding operation detected!");
-    } else if (sig_type == 0x0022) {  // ESP_ZB_ZDO_SIGNAL_UNBIND (if available)
+    } else if (sig_type == 0x0022) {  // ESP_ZB_ZDO_SIGNAL_UNBIND
+      DEBUG_LOG_BINDING(TAG, "Unbinding request received!");
       ESP_LOGI(TAG, "  └─ Unbinding operation detected!");
     }
+
+    // Additional debug info for any signal
+    DEBUG_LOG_ZIGBEE(TAG, "Signal detail - Type: 0x%04x, Status: %s", sig_type, esp_err_to_name(err_status));
     break;
   }
 }
@@ -237,7 +242,6 @@ void zigbee_task_entry(void *pvParameters)
   ESP_LOGE(TAG, "Zigbee task unexpectedly exited");
   vTaskDelete(NULL);
 }
-#endif // !DEBUG_MODE
 
 /* ===================== Zigbee init ===================== */
 void zigbeeInit()
@@ -250,13 +254,13 @@ void zigbeeInit()
     }
   }
 
-#if !DEBUG_MODE
-  // Enable verbose logging for Zigbee stack (to see binding operations)
-  esp_log_level_set("ESP_ZB_APS", ESP_LOG_DEBUG);  // APS layer (includes binding)
-  esp_log_level_set("ESP_ZB_ZDO", ESP_LOG_DEBUG);  // ZDO layer (includes binding requests)
-  esp_log_level_set("ESP_ZB_ZCL", ESP_LOG_DEBUG);  // ZCL layer (includes commands)
-  ESP_LOGI(TAG, "Zigbee verbose logging enabled for binding visibility");
-#endif
+  // Enable verbose Zigbee logging in debug mode
+  if (g_debug_mode) {
+    esp_log_level_set("ESP_ZB_APS", ESP_LOG_DEBUG);  // APS layer (includes binding)
+    esp_log_level_set("ESP_ZB_ZDO", ESP_LOG_DEBUG);  // ZDO layer (includes binding requests)
+    esp_log_level_set("ESP_ZB_ZCL", ESP_LOG_DEBUG);  // ZCL layer (includes commands)
+    DEBUG_LOG_ZIGBEE(TAG, "Verbose Zigbee stack logging enabled");
+  }
 
   // Initialize ADC for battery reading first
   adc_oneshot_unit_init_cfg_t adc_config = {
@@ -294,7 +298,6 @@ void zigbeeInit()
   );
   ESP_LOGI(TAG, "LED blink task created");
 
-#if !DEBUG_MODE
   ESP_LOGI(TAG, "Initializing Zigbee stack");
 
   // Configure Zigbee platform
@@ -370,7 +373,6 @@ void zigbeeInit()
   esp_zb_stack_main_loop();
 
   ESP_LOGI(TAG, "Zigbee stack started");
-#endif
 }
 
 /* ===================== Thread-Safe Accessors ===================== */
@@ -490,9 +492,7 @@ uint8_t vbat_percent(uint16_t mv)
   // Validate LUT size
   if (lut_size < 2)
   {
-#if DEBUG_MODE
     ESP_LOGE(TAG, "Battery LUT too small");
-#endif
     return 0;
   }
 
@@ -512,9 +512,7 @@ uint8_t vbat_percent(uint16_t mv)
     // Bounds check before accessing array
     if (i + 1 >= lut_size)
     {
-#if DEBUG_MODE
       ESP_LOGE(TAG, "Battery LUT bounds error");
-#endif
       return 0;
     }
 
@@ -544,9 +542,6 @@ void report_battery(uint16_t mv)
 {
   uint8_t pct = vbat_percent(mv);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "[BATTERY] %dmV (%d%%)", mv, pct);
-#else
   // Power Configuration cluster (0x0001):
   //  - BatteryVoltage (0x0020): tenths of volts (e.g. 3.95V -> 39)
   //  - BatteryPercentageRemaining (0x0021): half-percent units (87% -> 174)
@@ -554,6 +549,8 @@ void report_battery(uint16_t mv)
   uint8_t zcl_pct = (uint8_t)(std::min<uint16_t>(pct * ZCL_PERCENTAGE_SCALE, ZCL_PERCENTAGE_MAX));
 
   ESP_LOGI(TAG, "[BATTERY] Reporting: %dmV (%d%%) -> ZCL: voltage=%d, pct=%d", mv, pct, zcl_voltage, zcl_pct);
+  DEBUG_LOG_ZIGBEE(TAG, "Battery report - Raw: %dmV, Percentage: %d%%, ZCL voltage: %d, ZCL pct: %d",
+                   mv, pct, zcl_voltage, zcl_pct);
 
   // Update battery voltage attribute (0x0020)
   esp_err_t err = esp_zb_zcl_set_attribute_val(
@@ -582,7 +579,6 @@ void report_battery(uint16_t mv)
   }
 
   ESP_LOGI(TAG, "[BATTERY] Attributes updated successfully");
-#endif
 }
 
 /* ===================== Helpers ====================== */
@@ -616,9 +612,6 @@ void cmd_toggle(LampId lampId)
 {
   uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "cmd_toggle L%d", endpoint);
-#else
   // Send On/Off Toggle command via direct binding
   esp_zb_zcl_on_off_cmd_t cmd = {};
   cmd.zcl_basic_cmd.src_endpoint = endpoint;
@@ -626,8 +619,8 @@ void cmd_toggle(LampId lampId)
   cmd.on_off_cmd_id = ESP_ZB_ZCL_CMD_ON_OFF_TOGGLE_ID;
 
   ESP_LOGI(TAG, "Sending toggle from endpoint %d", endpoint);
+  DEBUG_LOG_ZIGBEE(TAG, "ZCL Command - Toggle (cluster: OnOff, endpoint: %d)", endpoint);
   esp_zb_zcl_on_off_cmd_req(&cmd);
-#endif
 }
 
 void cmd_level_start(LampId lampId)
@@ -635,9 +628,6 @@ void cmd_level_start(LampId lampId)
   bool up = get_dir();
   uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "cmd_level_start L%d (%s)", endpoint, up ? "UP" : "DOWN");
-#else
   // Send Level Control Move command via direct binding
   esp_zb_zcl_level_move_cmd_t cmd = {};
   cmd.zcl_basic_cmd.src_endpoint = endpoint;
@@ -646,25 +636,23 @@ void cmd_level_start(LampId lampId)
   cmd.rate = 50; // Rate of level change (units per second)
 
   ESP_LOGI(TAG, "Sending level move %s from endpoint %d", up ? "UP" : "DOWN", endpoint);
+  DEBUG_LOG_ZIGBEE(TAG, "ZCL Command - Level Move %s (cluster: LevelControl, endpoint: %d, rate: %d)",
+                   up ? "UP" : "DOWN", endpoint, cmd.rate);
   esp_zb_zcl_level_move_cmd_req(&cmd);
-#endif
 }
 
 void cmd_level_stop(LampId lampId)
 {
   uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "cmd_level_stop L%d", endpoint);
-#else
   // Send Level Control Stop command via direct binding
   esp_zb_zcl_level_stop_cmd_t cmd = {};
   cmd.zcl_basic_cmd.src_endpoint = endpoint;
   cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
 
   ESP_LOGI(TAG, "Sending level stop from endpoint %d", endpoint);
+  DEBUG_LOG_ZIGBEE(TAG, "ZCL Command - Level Stop (cluster: LevelControl, endpoint: %d)", endpoint);
   esp_zb_zcl_level_stop_cmd_req(&cmd);
-#endif
 }
 
 void cmd_ct_start(LampId lampId)
@@ -672,9 +660,6 @@ void cmd_ct_start(LampId lampId)
   bool up = get_dir();
   uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "cmd_ct_start L%d (%s)", endpoint, up ? "UP" : "DOWN");
-#else
   // Send Color Control Move Color Temperature command via direct binding
   esp_zb_zcl_color_move_color_temperature_cmd_t cmd = {};
   cmd.zcl_basic_cmd.src_endpoint = endpoint;
@@ -685,25 +670,23 @@ void cmd_ct_start(LampId lampId)
   cmd.color_temperature_maximum = 370; // Warmest (from lamp spec)
 
   ESP_LOGI(TAG, "Sending color temp move %s from endpoint %d", up ? "UP" : "DOWN", endpoint);
+  DEBUG_LOG_ZIGBEE(TAG, "ZCL Command - Color Temp Move %s (cluster: ColorControl, endpoint: %d, rate: %d, min: %d, max: %d)",
+                   up ? "UP (cooler)" : "DOWN (warmer)", endpoint, cmd.rate, cmd.color_temperature_minimum, cmd.color_temperature_maximum);
   esp_zb_zcl_color_move_color_temperature_cmd_req(&cmd);
-#endif
 }
 
 void cmd_ct_stop(LampId lampId)
 {
   uint8_t endpoint = static_cast<uint8_t>(lampId);
 
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "cmd_ct_stop L%d", endpoint);
-#else
   // Send Color Control Stop Move Step command via direct binding
   esp_zb_zcl_color_stop_move_step_cmd_t cmd = {};
   cmd.zcl_basic_cmd.src_endpoint = endpoint;
   cmd.address_mode = ESP_ZB_APS_ADDR_MODE_DST_ADDR_ENDP_NOT_PRESENT; // Use binding
 
   ESP_LOGI(TAG, "Sending color temp stop from endpoint %d", endpoint);
+  DEBUG_LOG_ZIGBEE(TAG, "ZCL Command - Color Temp Stop (cluster: ColorControl, endpoint: %d)", endpoint);
   esp_zb_zcl_color_stop_move_step_cmd_req(&cmd);
-#endif
 }
 
 void cmd_empty_action(LampId lampId)
@@ -716,29 +699,31 @@ void enter_pairing_mode(LampId lampId)
   (void)lampId; // Unused parameter
 
   ESP_LOGI(TAG, "[PAIRING] PAIRING_SEQUENCE detected - entering pairing mode");
+  DEBUG_LOG_ZIGBEE(TAG, "Pairing mode activated - factory reset will be performed");
 
   set_pairing_mode(true);
   set_pairing_deadline(millis() + (STEER_SECONDS * 1000UL));
 
   ESP_LOGI(TAG, "[PAIRING] LED will start blinking in main loop");
 
-#if !DEBUG_MODE
   // Factory reset - clear network settings
   // This will trigger ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START which will start steering
   ESP_LOGI(TAG, "[PAIRING] Performing factory reset...");
+  DEBUG_LOG_ZIGBEE(TAG, "Factory reset - clearing Zigbee network configuration");
   esp_zb_factory_reset();
   ESP_LOGI(TAG, "[PAIRING] Factory reset scheduled - device will restart and enter pairing");
-#else
-  ESP_LOGI(TAG, "[PAIRING] DEBUG MODE - LED will blink for %d seconds", STEER_SECONDS);
-#endif
 }
 
 /* ===================== Sleep ===================== */
 void goto_sleep()
 {
-#if DEBUG_MODE || DISABLE_SLEEP
-  delay(10); // Don't sleep when disabled
-#else
+  // Debug mode: never sleep (device stays awake for continuous logging)
+  if (g_debug_mode) {
+    // Sleep skipped in debug mode - don't log (called every 10ms, would spam console)
+    delay(10);
+    return;
+  }
+
   const uint64_t us_per_hour = 3600ULL * 1000000ULL;
   const uint64_t sleep_duration_us = (uint64_t)PING_INTERVAL_HOURS * us_per_hour;
 
@@ -751,7 +736,6 @@ void goto_sleep()
   // Small delay for any pending TX
   delay(ZIGBEE_FLUSH_DELAY_MS);
 
-  ESP_LOGI(TAG, "Entering deep sleep");
+  ESP_LOGI(TAG, "Entering deep sleep (wake on button or %dh timer)", PING_INTERVAL_HOURS);
   esp_deep_sleep_start();
-#endif
 }

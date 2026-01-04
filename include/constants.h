@@ -12,10 +12,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-/* ===================== Debug Mode ===================== */
-#define DEBUG_MODE 0 // Set to 1 to test gestures without Zigbee (prints to Serial), 0 to enable Zigbee
-#define DISABLE_SLEEP 1 // Set to 1 to prevent sleep during testing (allows continuous button testing with Zigbee enabled)
-
 /* ===================== Pins ===================== */
 constexpr gpio_num_t BTN1_PIN = GPIO_NUM_1;               // XIAO ESP32-C6: D1 = GPIO1
 constexpr gpio_num_t BTN2_PIN = GPIO_NUM_2;               // XIAO ESP32-C6: D2 = GPIO2

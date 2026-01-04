@@ -1,4 +1,5 @@
 #include "constants.h"
+#include "debug.h"
 #include "buttons.h"
 #include "router.h"
 #include "zigbee.h"
@@ -10,6 +11,24 @@ static uint32_t last_pairing_loop_ms = 0;
 
 extern "C" void app_main()
 {
+  // CRITICAL: Detect debug mode FIRST (before any initialization)
+  // This must happen before NVS, buttons, or Zigbee init
+  g_debug_mode = detect_debug_mode();
+
+  if (g_debug_mode) {
+    // Enable verbose logging when in debug mode
+    esp_log_level_set("*", ESP_LOG_DEBUG);
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "DEBUG MODE ACTIVE");
+    ESP_LOGI(TAG, "- Sleep: DISABLED");
+    ESP_LOGI(TAG, "- Logging: VERBOSE");
+    ESP_LOGI(TAG, "- Zigbee: ENABLED (normal operation)");
+    ESP_LOGI(TAG, "========================================");
+  } else {
+    // Normal mode - standard logging
+    esp_log_level_set("*", ESP_LOG_INFO);
+  }
+
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -42,14 +61,6 @@ extern "C" void app_main()
     wakeup_cause == ESP_SLEEP_WAKEUP_UNDEFINED ? "Power-on/Reset" :
     "Other");
 
-#if DEBUG_MODE
-  esp_log_level_set("*", ESP_LOG_INFO);
-  delay(500);
-  ESP_LOGI(TAG, "=== DEBUG MODE: Gestures test (no Zigbee) ===");
-  ESP_LOGI(TAG, "Auto-reset enabled! Upload should work without BOOT button now.");
-  ESP_LOGI(TAG, "BTN1_PIN=%d, BTN2_PIN=%d", BTN1_PIN, BTN2_PIN);
-  ESP_LOGI(TAG, "Waiting for button presses...");
-#else
   // Start Zigbee stack in separate FreeRTOS task (non-blocking)
   ESP_LOGI(TAG, "Creating Zigbee task");
   xTaskCreate(zigbee_task_entry, "zigbee", 4096, NULL, 5, &zigbee_task_handle);
@@ -89,7 +100,6 @@ extern "C" void app_main()
     ESP_LOGI(TAG, "Zigbee connection timeout - entering sleep");
     goto_sleep();
   }
-#endif
 
   // Main loop
   while (true) {
@@ -125,15 +135,12 @@ extern "C" void app_main()
     ButtonEvent ev2 = handleButton(b2);
     routeEvents(ev1, ev2);
 
-#if !DEBUG_MODE
-#if !DISABLE_SLEEP
-    goto_sleep();
-#else
-    delay(10);  // Small delay when sleep disabled to not spin too fast
-#endif
-#else
-    delay(10);  // Small delay in debug mode to not spin too fast
-#endif
+    // Sleep control: skip sleep in debug mode
+    if (g_debug_mode) {
+      delay(10);  // Small delay in debug mode to not spin too fast
+    } else {
+      goto_sleep();  // Normal operation: sleep after handling events
+    }
 
     // Yield to allow other tasks (like Zigbee task) to run
     vTaskDelay(pdMS_TO_TICKS(10));

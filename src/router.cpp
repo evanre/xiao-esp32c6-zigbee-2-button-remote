@@ -1,4 +1,5 @@
 #include "router.h"
+#include "debug.h"
 #include "zigbee.h"
 
 #define TAG "ROUTER"
@@ -19,11 +20,11 @@ static ButtonEvent matchingEnd(ButtonEvent startEv)
 
 static void sendAction(void (*callback)(LampId), LampId lampId, const char *msg)
 {
-#if DEBUG_MODE
-  ESP_LOGI(TAG, "[SEND] %s L%d", msg, static_cast<uint8_t>(lampId));
-#else
+  // Log command in debug mode (before sending)
+  DEBUG_LOG_ROUTER(TAG, "Sending %s to L%d", msg, static_cast<uint8_t>(lampId));
+
+  // Always execute the callback (Zigbee command)
   callback(lampId);
-#endif
 }
 
 void dispatch(LampId lampId, ButtonEvent ev)
@@ -141,6 +142,7 @@ void routeEvents(ButtonEvent ev1, ButtonEvent ev2)
       router.ev1_pending == router.ev2_pending)
   {
     ButtonEvent ev = router.ev1_pending;
+    DEBUG_LOG_ROUTER(TAG, "Combo detected! Both buttons triggered same event, routing to L3");
     dispatch(LampId::L3, ev);
     router = {};
 

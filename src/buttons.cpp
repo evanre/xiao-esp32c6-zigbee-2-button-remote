@@ -1,4 +1,7 @@
 #include "buttons.h"
+#include "debug.h"
+
+#define TAG "BUTTONS"
 
 static inline bool pinRead(gpio_num_t pin) {
     return gpio_get_level(pin) == 1;
@@ -6,6 +9,29 @@ static inline bool pinRead(gpio_num_t pin) {
 
 BtnState b1(BTN1_PIN);
 BtnState b2(BTN2_PIN);
+
+// Helper to get button name for logging
+static const char* btn_name(gpio_num_t pin) {
+    if (pin == BTN1_PIN) return "BTN1";
+    if (pin == BTN2_PIN) return "BTN2";
+    return "BTN?";
+}
+
+// Helper to get event name for logging
+static const char* event_name(ButtonEvent ev) {
+    switch (ev) {
+        case ButtonEvent::NONE: return "NONE";
+        case ButtonEvent::CLICK: return "CLICK";
+        case ButtonEvent::DOUBLE_CLICK: return "DOUBLE_CLICK";
+        case ButtonEvent::TRIPLE_CLICK: return "TRIPLE_CLICK";
+        case ButtonEvent::PAIRING_SEQUENCE: return "PAIRING_SEQUENCE";
+        case ButtonEvent::HOLD_START: return "HOLD_START";
+        case ButtonEvent::HOLD_END: return "HOLD_END";
+        case ButtonEvent::CLICK_HOLD_START: return "CLICK_HOLD_START";
+        case ButtonEvent::CLICK_HOLD_END: return "CLICK_HOLD_END";
+        default: return "UNKNOWN";
+    }
+}
 
 void initButtons()
 {
@@ -22,6 +48,20 @@ ButtonEvent handleButton(BtnState &b)
 {
   bool pressed = pinRead(b.pin) == 0;
   uint32_t now = millis();
+
+  // Log press/release events in debug mode
+  static bool prev_pressed_b1 = false;
+  static bool prev_pressed_b2 = false;
+  bool* prev_pressed = (b.pin == BTN1_PIN) ? &prev_pressed_b1 : &prev_pressed_b2;
+
+  if (pressed != *prev_pressed) {
+    if (pressed) {
+      DEBUG_LOG_BUTTON(TAG, "%s pressed at t=%lu ms", btn_name(b.pin), now);
+    } else {
+      DEBUG_LOG_BUTTON(TAG, "%s released at t=%lu ms", btn_name(b.pin), now);
+    }
+    *prev_pressed = pressed;
+  }
 
   if (pressed)
   {
@@ -59,11 +99,14 @@ ButtonEvent handleButton(BtnState &b)
         if (b.clicks == 0)
         {
           b.state = ButtonModeEnum::HOLDING;
+          DEBUG_LOG_BUTTON(TAG, "%s detected HOLD_START (held %lu ms)", btn_name(b.pin), delta_ms);
           return ButtonEvent::HOLD_START;
         }
         else
         {
           b.state = ButtonModeEnum::CLICK_HOLDING;
+          DEBUG_LOG_BUTTON(TAG, "%s detected CLICK_HOLD_START (clicks=%d, held %lu ms)",
+                          btn_name(b.pin), b.clicks, delta_ms);
           return ButtonEvent::CLICK_HOLD_START;
         }
       }
@@ -109,12 +152,14 @@ ButtonEvent handleButton(BtnState &b)
       {
         b.state = ButtonModeEnum::IDLE;
         b.clicks = 0;
+        DEBUG_LOG_BUTTON(TAG, "%s detected HOLD_END (duration %lu ms)", btn_name(b.pin), delta_ms);
         return ButtonEvent::HOLD_END;
       }
       if (b.state == ButtonModeEnum::CLICK_HOLDING)
       {
         b.state = ButtonModeEnum::IDLE;
         b.clicks = 0;
+        DEBUG_LOG_BUTTON(TAG, "%s detected CLICK_HOLD_END (duration %lu ms)", btn_name(b.pin), delta_ms);
         return ButtonEvent::CLICK_HOLD_END;
       }
 
@@ -168,6 +213,8 @@ ButtonEvent handleButton(BtnState &b)
       {
         ev = ButtonEvent::PAIRING_SEQUENCE;
       }
+
+      DEBUG_LOG_BUTTON(TAG, "%s detected %s (%d clicks)", btn_name(b.pin), event_name(ev), b.clicks);
 
       // reset state
       b.clicks = 0;
